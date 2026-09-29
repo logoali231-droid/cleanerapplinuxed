@@ -30,6 +30,7 @@ def _schedule_lr(epoch, total_epochs, mode):
         return 1.0 - 0.7 * ((epoch - warmup) / (total_epochs - warmup))
     return 1.0
 
+
 def _apply_one(agent, state, label, weight, multiplier):
     if label == 1:
         correct, wrong = 1, 0
@@ -84,7 +85,7 @@ def train(agent, examples, options, progress_cb=None, cancel_cb=None):
         else:
             data = train_set
 
-                multiplier = _schedule_lr(epoch, total_epochs, options.lr_schedule)
+        multiplier = _schedule_lr(epoch, total_epochs, options.lr_schedule)
 
         for state, label, weight in data:
             _apply_one(agent, state, label, weight, multiplier)
