@@ -178,18 +178,29 @@ CRITICAL_NAMES = {
 }
 
 
+OFFICE_DOC_EXTS = {
+    ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp", ".odg", ".rtf",
+}
+
+
 def sniff_file_kind(path):
     """
     Read first SNIFF_BYTES and return (kind, preview).
     kinds:
-      'unreadable', 'empty',
+      'unreadable', 'empty', 'critical', 'office-doc',
       'binary-exec', 'binary-archive', 'binary-magic', 'binary',
       'text-code', 'text-doc', 'text-config', 'text-log', 'text-data'
     """
-    path = Path(path)  # defensive — accept str or Path
+    path = Path(path)
 
+    # Never touch user secrets or account databases.
     if path.name.lower() in CRITICAL_NAMES or path.suffix.lower() in CRITICAL_EXTS:
-        return ("text-data", "critical name/extension")
+        return ("critical", "critical name/extension")
+
+    # Documents are user data — treat them like code (never flag).
+    if path.suffix.lower() in OFFICE_DOC_EXTS:
+        return ("office-doc", f"{path.suffix} document")
 
     try:
         with open(path, "rb") as f:
@@ -248,21 +259,9 @@ def sniff_file_kind(path):
         return ("text-config", "YAML")
 
     code_markers = (
-        "import ",
-        "from ",
-        "def ",
-        "class ",
-        "async def",
-        "#include",
-        "/* ",
-        "*/",
-        "// ",
-        "package ",
-        "using namespace",
-        "function ",
-        "const ",
-        "let ",
-        "var ",
+        "import ", "from ", "def ", "class ", "async def",
+        "#include", "/* ", "*/", "// ", "package ",
+        "using namespace", "function ", "const ", "let ", "var ",
     )
     if any(m in text[:2500] for m in code_markers):
         return ("text-code", first_line)
@@ -282,7 +281,6 @@ def sniff_file_kind(path):
         return ("text-log", first_line)
 
     return ("text-data", first_line)
-
 
 # ======================================================================
 # SCREENSHOT DETECTION
