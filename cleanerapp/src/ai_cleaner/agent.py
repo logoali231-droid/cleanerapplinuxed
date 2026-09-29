@@ -5,7 +5,7 @@ import os
 import pickle
 import random
 
-from .config import QTABLE_PATH
+from .config import QTABLE_PATH, CONFIDENCE_RULE_THRESHOLD
 from .state import ext_bucket
 
 
@@ -103,12 +103,16 @@ class QLearningAgent:
 
     # ---------- calibration ----------
 
-
     def record_decision(self, conf, accepted):
         """Log one user decision about an AI-flagged file."""
         if conf is None or conf >= CONFIDENCE_RULE_THRESHOLD:
             return  # skip rule-flagged and screenshot entries
-  
+        bucket = round(conf * 2) / 2.0
+        if bucket not in self.conf_stats:
+            self.conf_stats[bucket] = [0, 0]
+        self.conf_stats[bucket][0] += 1
+        if accepted:
+            self.conf_stats[bucket][1] += 1
 
     def dynamic_threshold(self, target_acceptance=0.5, min_samples=15):
         """
