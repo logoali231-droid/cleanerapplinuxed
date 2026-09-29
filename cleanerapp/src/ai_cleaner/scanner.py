@@ -3,6 +3,7 @@
 import os
 import time
 from pathlib import Path
+from .config import CONFIDENCE_RULE
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -18,6 +19,8 @@ from .protection import (
 )
 from .state import extract_state, plain_reason
 
+
+
 # Screenshots older than this many days get flagged automatically.
 # Change to taste. 30 is a good balance — recent ones stay safe.
 SCREENSHOT_MIN_AGE_DAYS = 30
@@ -27,11 +30,21 @@ ETA_ALPHA = 0.15           # EMA smoothing — lower = smoother, higher = more r
 ETA_WARMUP_FILES = 300     # don't show an ETA until this many files are scanned
 ETA_WARMUP_SECONDS = 2.0   # ...or this many seconds, whichever is later
 
+# Batching config — how many files to accumulate before firing a Qt signal.
+# Larger = fewer signals but chunkier UI updates.
+BATCH_MIN_FILES = 25
+BATCH_MIN_SECONDS = 0.15
+
+# Set this to False once wizard.py connects to `files_found` instead of
+# `file_found`. Emitting the legacy per-item signal costs ~1 µs/file —
+# noticeable at 100k+ files.
+EMIT_LEGACY_FILE_SIGNAL = True
+
+
 class ScannerThread(QThread):
-    progress = pyqtSignal(
-        int, int, str, float, bool
-    )  # scanned, total, cur, eta, counting
-    file_found = pyqtSignal(dict)
+    progress = pyqtSignal(int, int, str, float, bool)
+    file_found = pyqtSignal(dict)     # legacy, per-item — will be removed
+    files_found = pyqtSignal(list)    # new, batched
     finished_scan = pyqtSignal(list)
     status = pyqtSignal(str)
 
@@ -42,7 +55,6 @@ class ScannerThread(QThread):
         self.rules = rules
         self.deep_mode = deep_mode
         self._running = True
-
     def stop(self):
         self._running = False
 
@@ -83,7 +95,7 @@ class ScannerThread(QThread):
                 t_last = now
         return n
 
-    def run(self):
+        def run(self):
         root = Path(self.root_path).expanduser().resolve()
         self.status.emit("Counting files…")
         total = self._count_files(root)
@@ -92,15 +104,10 @@ class ScannerThread(QThread):
             return
         self.status.emit(f"Analyzing {total:,} files…")
 
-        # Read the user's screenshot-age preference once at scan start.
-        # 0 means "don't flag screenshots at all".
-
         screenshot_age_days = int(
             self.rules.settings.get("screenshot_min_age_days", SCREENSHOT_MIN_AGE_DAYS)
         )
 
-        # Confidence threshold: -1 = let the AI decide from its calibration;
-        # any other value = manual override. Log both so you can see it.
         manual = float(self.rules.settings.get("min_confidence", -1))
         if manual < 0:
             min_confidence = self.agent.dynamic_threshold()
@@ -113,13 +120,31 @@ class ScannerThread(QThread):
             self.status.emit(f"Manual confidence threshold: {min_confidence:.2f}")
 
         results = []
+        pending = []
         scanned = 0
         t0 = time.time()
         last_emit = 0.0
-        # Smoothed rate (files/sec). Starts as None so we can bootstrap
-        # on the first few samples instead of jumping from 0.
+        last_batch = time.time()
+
+        # --- ETA state (true instantaneous rate, EMA-smoothed) ---
         ema_rate = None
-        ema_t0 = None
+        last_sample_scanned = 0
+        last_sample_time = t0
+
+        def flush_batch(force=False):
+            if not pending:
+                return
+            now = time.time()
+            if not force and len(pending) < BATCH_MIN_FILES \
+                    and (now - last_batch) < BATCH_MIN_SECONDS:
+                return
+            batch = list(pending)
+            self.files_found.emit(batch)
+            if EMIT_LEGACY_FILE_SIGNAL:
+                for info in batch:
+                    self.file_found.emit(info)
+            pending.clear()
+            return now
 
         for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
             if not self._running:
@@ -147,12 +172,12 @@ class ScannerThread(QThread):
                             "size": st.st_size,
                             "age": int((time.time() - st.st_mtime) / 86400.0),
                             "state": None,
-                            "confidence": 999.0,
+                            "confidence": CONFIDENCE_RULE,
                             "reason": rule.get("note")
                             or f"Your rule: {rule.get('value', '')}",
                         }
                         results.append(info)
-                        self.file_found.emit(info)
+                        pending.append(info)
                     except (PermissionError, OSError):
                         pass
                     continue
@@ -169,7 +194,8 @@ class ScannerThread(QThread):
                         continue
 
                     kind, _preview = sniff_file_kind(fpath)
-                    if kind in ("text-code", "binary-exec", "unreadable"):
+                    if kind in ("text-code", "binary-exec", "unreadable",
+                                "critical", "office-doc"):
                         continue
 
                     st = fpath.stat()
@@ -177,7 +203,6 @@ class ScannerThread(QThread):
                     age = (time.time() - st.st_mtime) / 86400.0
                     state = extract_state(fpath, size, age)
 
-                    # -- Screenshot shortcut: heuristic, not AI --
                     if (
                         screenshot_age_days > 0
                         and is_screenshot(fpath)
@@ -189,14 +214,14 @@ class ScannerThread(QThread):
                             "size": size,
                             "age": int(age),
                             "state": state,
-                            "confidence": 999.0,
+                            "confidence": CONFIDENCE_RULE,
                             "reason": (
                                 f"An old screenshot "
                                 f"({int(age)} days) — probably no longer needed"
                             ),
                         }
                         results.append(info)
-                        self.file_found.emit(info)
+                        pending.append(info)
                         continue
 
                     if self.agent.act(state, explore=False) == 1:
@@ -213,30 +238,32 @@ class ScannerThread(QThread):
                             "reason": plain_reason(fpath, size, int(age)),
                         }
                         results.append(info)
-                        self.file_found.emit(info)
+                        pending.append(info)
                 except (PermissionError, OSError, FileNotFoundError):
                     continue
 
                 now = time.time()
+
+                # --- batched signal flush ---
+                flushed_at = flush_batch()
+                if flushed_at:
+                    last_batch = flushed_at
+
+                # --- progress / ETA ---
                 if now - last_emit > 0.15:
-                    # --- EMA-based rate estimate ---
-                    # Bootstrap on the first sample, then smooth.
-                    if ema_t0 is None:
-                        ema_t0 = now
-                    if ema_rate is None:
-                        # First real sample: use the raw average so far
-                        dt = now - ema_t0
-                        ema_rate = scanned / dt if dt > 0.1 else None
-                    elif scanned > 0:
-                        dt = now - ema_t0
-                        if dt > 0.2:
-                            instant_rate = scanned / max(now - t0, 0.1)
+                    # True instantaneous rate since the last sample.
+                    delta_files = scanned - last_sample_scanned
+                    delta_t = now - last_sample_time
+                    if delta_t > 0.2:
+                        instant_rate = delta_files / delta_t
+                        if ema_rate is None:
+                            ema_rate = instant_rate
+                        else:
                             ema_rate = (ETA_ALPHA * instant_rate
                                         + (1 - ETA_ALPHA) * ema_rate)
-                            ema_t0 = now
+                        last_sample_scanned = scanned
+                        last_sample_time = now
 
-                    # --- ETA gating ---
-                    # Don't show an ETA until we've seen enough data.
                     ready = (
                         ema_rate is not None
                         and ema_rate > 0
@@ -247,10 +274,12 @@ class ScannerThread(QThread):
                         remaining = max(0, total - scanned)
                         eta = remaining / ema_rate
                     else:
-                        eta = -1.0   # sentinel: warm-up
+                        eta = -1.0
 
                     self.progress.emit(scanned, total, dirpath, eta, False)
                     last_emit = now
 
+        # Final flush so nothing gets stranded
+        flush_batch(force=True)
         self.progress.emit(scanned, total, "", 0.0, False)
         self.finished_scan.emit(results)
