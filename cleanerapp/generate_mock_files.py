@@ -30,15 +30,7 @@ from pathlib import Path
 # Content writers — realistic bytes for each file kind
 # ----------------------------------------------------------------------
 
-def _write(p, data, days_ago):
-    """Write bytes, pad to size, set mtime."""
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "wb") as f:
-        f.write(data)
-        len(data)
-        # pad with zeroes up to size target (kept by caller via `size`)
-    ts = (datetime.now() - timedelta(days=days_ago)).timestamp()  # noqa: DTZ005
-    os.utime(p, (ts, ts))
+SIZE_CAP_QUICK = 10 * 1024 * 1024  # 10 MB
 
 
 def _write_padded(p, header, size, days_ago):
@@ -94,7 +86,24 @@ def build_sandbox(root: Path, quick=False):
     root.mkdir(parents=True, exist_ok=True)
 
     created = {"junk": 0, "keepers": 0, "protected": 0, "screenshots": 0,
-               "fresh": 0, "sniff": 0, "edge": 0, "empty": 0}
+               "fresh": 0, "sniff": 0, "edge": 0, "empty": 0,
+               "skipped": 0}
+
+    def emit_bytes(rel, header, days, size):
+        """Write a binary file unless quick mode says skip it."""
+        if quick and size > SIZE_CAP_QUICK:
+            created["skipped"] += 1
+            return False
+        _write_padded(root / rel, header, size, days)
+        return True
+
+    def emit_text(rel, text, size, days):
+        """Write a text file unless quick mode says skip it."""
+        if quick and size > SIZE_CAP_QUICK:
+            created["skipped"] += 1
+            return False
+        write_text(root / rel, text, size, days)
+        return True
 
     # ------------------------------------------------------------------
     # 1. JUNK — should be flagged
@@ -123,15 +132,15 @@ def build_sandbox(root: Path, quick=False):
     ) * 500
 
     for rel, header, days, size in junk:
-        _write_padded(root / rel, header, size, days)
+        if emit_bytes(rel, header, days, size):
+            created["junk"] += 1
+
+    if emit_text("tmp/build_debug.log", log_text, kb(800), 65):
         created["junk"] += 1
 
-    write_text(root / "tmp" / "build_debug.log", log_text, kb(800), 65)
-    created["junk"] += 1
-
-    write_text(root / "cache" / "stale_index.tmp",
-               "stale index, safe to remove\n" * 100, kb(400), 400)
-    created["junk"] += 1
+    if emit_text("cache/stale_index.tmp",
+                 "stale index, safe to remove\n" * 100, kb(400), 400):
+        created["junk"] += 1
 
     # ------------------------------------------------------------------
     # 2. KEEPERS — should NOT be flagged
@@ -143,28 +152,32 @@ def build_sandbox(root: Path, quick=False):
         ("Videos/holiday_clip.mp4",      b"\x00\x00\x00\x18ftypmp42", 20, mb(180)),
     ]
     for rel, header, days, size in keepers_real:
-        _write_padded(root / rel, header, size, days)
-        created["keepers"] += 1
+        if emit_bytes(rel, header, days, size):
+            created["keepers"] += 1
 
-    write_text(root / "Documents" / "notes.txt",
-               "Some notes\n" * 50, kb(30), 2)
-    write_text(root / "Documents" / "important_letter.docx",
-               "Dear Sir,\nThis is a letter.\n" * 20, kb(80), 10)
-    write_text(root / "Projects" / "myscript.py",
-               "#!/usr/bin/env python3\n"
-               "def main():\n"
-               "    print('hello')\n"
-               "\n"
-               "if __name__ == '__main__':\n"
-               "    main()\n",
-               kb(15), 1)
-    write_text(root / "Projects" / "main.c",
-               "#include <stdio.h>\n"
-               "int main(void) { return 0; }\n",
-               kb(8), 3)
-    write_text(root / "Projects" / "README.md",
-               "# My project\n\nThis is a test.\n", kb(2), 1)
-    created["keepers"] += 5
+    if emit_text("Documents/notes.txt",
+                 "Some notes\n" * 50, kb(30), 2):
+        created["keepers"] += 1
+    if emit_text("Documents/important_letter.docx",
+                 "Dear Sir,\nThis is a letter.\n" * 20, kb(80), 10):
+        created["keepers"] += 1
+    if emit_text("Projects/myscript.py",
+                 "#!/usr/bin/env python3\n"
+                 "def main():\n"
+                 "    print('hello')\n"
+                 "\n"
+                 "if __name__ == '__main__':\n"
+                 "    main()\n",
+                 kb(15), 1):
+        created["keepers"] += 1
+    if emit_text("Projects/main.c",
+                 "#include <stdio.h>\n"
+                 "int main(void) { return 0; }\n",
+                 kb(8), 3):
+        created["keepers"] += 1
+    if emit_text("Projects/README.md",
+                 "# My project\n\nThis is a test.\n", kb(2), 1):
+        created["keepers"] += 1
 
     # ------------------------------------------------------------------
     # 3. PROTECTED — games, PrismLauncher, Minecraft, .jar
@@ -195,8 +208,8 @@ def build_sandbox(root: Path, quick=False):
                                                  b"\x00" * 512, 500, mb(200)),
     ]
     for rel, header, days, size in protected:
-        _write_padded(root / rel, header, size, days)
-        created["protected"] += 1
+        if emit_bytes(rel, header, days, size):
+            created["protected"] += 1
 
     # ------------------------------------------------------------------
     # 4. SCREENSHOTS — should be flagged if older than the setting
@@ -216,20 +229,20 @@ def build_sandbox(root: Path, quick=False):
         ("Pictures/Screenshot (5).png",                                     180, mb(1)),
     ]
     for rel, days, size in shots:
-        _write_padded(root / rel, PNG, size, days)
-        created["screenshots"] += 1
+        if emit_bytes(rel, PNG, days, size):
+            created["screenshots"] += 1
 
     # ------------------------------------------------------------------
     # 5. FRESH FILES — recent mtimes, should not be flagged
     # ------------------------------------------------------------------
     for i in range(3):
         rel = f"Downloads/recent_file_{i+1}.deb"
-        _write_padded(root / rel, DEB, mb(5), 0.5)  # 12 hours old
-        created["fresh"] += 1
+        if emit_bytes(rel, DEB, 0.5, mb(5)):  # 12 hours old
+            created["fresh"] += 1
 
-    write_text(root / "tmp" / "active_session.log",
-               "still being written to\n" * 20, kb(50), 0.1)
-    created["fresh"] += 1
+    if emit_text("tmp/active_session.log",
+                 "still being written to\n" * 20, kb(50), 0.1):
+        created["fresh"] += 1
 
     # ------------------------------------------------------------------
     # 6. CONTENT-SNIFF TEST FILES — verify each sniffer branch
@@ -249,8 +262,8 @@ def build_sandbox(root: Path, quick=False):
          b"# README\n\nThis is documentation.\n" + b"\n" * kb(20), 200, kb(21)),
     ]
     for rel, data, days, size in sniff_tests:
-        _write_padded(root / rel, data, size, days)
-        created["sniff"] += 1
+        if emit_bytes(rel, data, days, size):
+            created["sniff"] += 1
 
     # ------------------------------------------------------------------
     # 7. BOUNDARY CASES — exactly at bucket edges
@@ -269,8 +282,8 @@ def build_sandbox(root: Path, quick=False):
         ("tmp/edge_size_11mb.deb",     DEB, 200,  mb(11)),
     ]
     for rel, header, days, size in edges:
-        _write_padded(root / rel, header, size, days)
-        created["edge"] += 1
+        if emit_bytes(rel, header, days, size):
+            created["edge"] += 1
 
     # ------------------------------------------------------------------
     # 8. EMPTY + HIDDEN
@@ -279,9 +292,9 @@ def build_sandbox(root: Path, quick=False):
     (root / "tmp" / "empty_file.dat").touch()
     created["empty"] += 1
 
-    write_text(root / "Documents" / ".hidden_dotfile",
-               "hidden config\n", kb(2), 100)
-    created["empty"] += 1
+    if emit_text("Documents/.hidden_dotfile",
+                 "hidden config\n", kb(2), 100):
+        created["empty"] += 1
 
     # ------------------------------------------------------------------
     # Summary
@@ -300,6 +313,8 @@ def build_sandbox(root: Path, quick=False):
     print(f"     🔍  Sniff tests    : {created['sniff']}   (should be skipped by sniffer)")
     print(f"     📐  Edge cases     : {created['edge']}")
     print(f"     📭  Empty/hidden   : {created['empty']}")
+    if created["skipped"]:
+        print(f"     ⏭  Skipped        : {created['skipped']}   (quick mode — over 10 MB)")
     print("     ────────────────────────────")
     print(f"     Total            : {total} files")
     print()
