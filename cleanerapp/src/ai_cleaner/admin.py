@@ -37,28 +37,6 @@ def find_askpass():
     return None
 
 
-def _build_script_launcher(tmp_script, python, script, folder, deep):
-    lines = [
-        "#!/bin/bash",
-        "echo '=== AI File Cleaner — admin launch ==='",
-        "echo 'The system will now ask for your password.'",
-        "echo",
-    ]
-    cmd = f"sudo -E {shlex.quote(python)} {shlex.quote(script)} --admin"
-    if folder: cmd += f" --folder {shlex.quote(folder)}"
-    if deep:   cmd += " --deep"
-    lines.append(cmd)
-    lines += [
-        "rc=$?",
-        "echo",
-        "if [ $rc -ne 0 ]; then echo \"=== Launch failed (exit $rc) ===\"; fi",
-        "echo 'Press Enter to close this window…'",
-        "read _",
-        f"rm -f {shlex.quote(tmp_script)}",
-    ]
-    return "\n".join(lines) + "\n"
-
-
 def terminal_argv(term, script_path):
     name = os.path.basename(term)
     if name in ("gnome-terminal", "mate-terminal"):
@@ -70,10 +48,58 @@ def terminal_argv(term, script_path):
     return [term, "-e", "bash", script_path]
 
 
+def _write_terminal_launcher(package_dir, folder, deep, signal_file):
+    """
+    Write a shell script to a temp file that:
+      - cd's into the src/ dir (so `python3 -m ai_cleaner` works)
+      - exports PYTHONPATH and the user's HOME
+      - runs the app under sudo -E
+    Returns the temp file path.
+    """
+    fd, tmp = tempfile.mkstemp(prefix="ai-cleaner-launch-", suffix=".sh")
+    os.close(fd)
+
+    inner = [f"sudo -E {shlex.quote(sys.executable or 'python3')}",
+             "-m ai_cleaner --admin"]
+    if folder:
+        inner.append(f"--folder {shlex.quote(folder)}")
+    if deep:
+        inner.append("--deep")
+    if signal_file:
+        inner.append(f"--signal-file {shlex.quote(signal_file)}")
+    cmd = " ".join(inner)
+
+    script = f"""#!/bin/bash
+echo '=== AI File Cleaner — admin launch ==='
+echo 'The system will now ask for your password.'
+echo
+cd {shlex.quote(package_dir)}
+export PYTHONPATH={shlex.quote(package_dir)}:$PYTHONPATH
+export AI_CLEANER_USER_HOME={shlex.quote(HOME)}
+{cmd}
+rc=$?
+echo
+if [ $rc -ne 0 ]; then
+    echo "=== Launch failed (exit $rc) ==="
+    echo
+    echo "If this is the first time, try again — the admin dialog may have"
+    echo "timed out. If it keeps failing, check:"
+    echo "  {CONFIG_DIR}/admin-launch.log"
+fi
+echo
+echo 'Press Enter to close this window…'
+read _
+rm -f {shlex.quote(tmp)}
+"""
+    with open(tmp, "w") as f:
+        f.write(script)
+    os.chmod(tmp, 0o755)
+    return tmp
+
+
 def relaunch_as_admin(folder=None, deep=False, method="terminal",
                       signal_file=None, parent=None):
     python = sys.executable or "python3"
-    # __main__.py is our entry point — invoke the package as a module
     package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     inner = [python, "-m", "ai_cleaner", "--admin"]
     if folder:      inner += ["--folder", folder]
@@ -90,26 +116,8 @@ def relaunch_as_admin(folder=None, deep=False, method="terminal",
         if not term:
             return False, ("Couldn't find a terminal emulator.\n\n"
                            "Install one with:  sudo apt install mate-terminal")
-        fd, tmp = tempfile.mkstemp(prefix="ai-cleaner-launch-", suffix=".sh")
-        os.close(fd)
         try:
-            with open(tmp, "w") as f:
-                f.write(_build_script_launcher(tmp, python, package_dir, folder, deep))
-            os.chmod(tmp, 0o755)
-            # shell wrapper: cd into the parent and set PYTHONPATH
-            script = f"""#!/bin/bash
-cd {shlex.quote(package_dir)}
-export PYTHONPATH={shlex.quote(package_dir)}:$PYTHONPATH
-export AI_CLEANER_USER_HOME={shlex.quote(HOME)}
-sudo -E {shlex.quote(python)} -m ai_cleaner --admin""" + (
-                f" --folder {shlex.quote(folder)}" if folder else ""
-            ) + (" --deep" if deep else "") + (
-                f" --signal-file {shlex.quote(signal_file)}" if signal_file else ""
-            ) + """
-"""
-            with open(tmp, "w") as f:
-                f.write(script)
-            os.chmod(tmp, 0o755)
+            tmp = _write_terminal_launcher(package_dir, folder, deep, signal_file)
             argv = terminal_argv(term, tmp)
             _admin_log(f"exec: {argv}")
             subprocess.Popen(argv, close_fds=True)
