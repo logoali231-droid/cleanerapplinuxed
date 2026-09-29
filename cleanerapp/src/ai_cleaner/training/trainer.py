@@ -14,12 +14,11 @@ def _split_holdout(examples, frac):
     return data[n:], data[:n]
 
 
-def _schedule_lr(base, epoch, total_epochs, mode):
+def _schedule_lr(epoch, total_epochs, mode):
     """Return the multiplier applied to BASE_REWARD for this epoch."""
     if mode == "constant" or total_epochs <= 1:
         return 1.0
     if mode == "linear_decay":
-        # 1.0 at epoch 0 → 0.4 at last epoch
         return 1.0 - 0.6 * (epoch / (total_epochs - 1))
     if mode == "cosine":
         import math
@@ -30,7 +29,6 @@ def _schedule_lr(base, epoch, total_epochs, mode):
             return 0.3 + 0.7 * (epoch / warmup)
         return 1.0 - 0.7 * ((epoch - warmup) / (total_epochs - warmup))
     return 1.0
-
 
 def _apply_one(agent, state, label, weight, multiplier):
     if label == 1:
@@ -86,8 +84,7 @@ def train(agent, examples, options, progress_cb=None, cancel_cb=None):
         else:
             data = train_set
 
-        multiplier = _schedule_lr(options.lr_schedule, epoch,
-                                  total_epochs, options.lr_schedule)
+                multiplier = _schedule_lr(epoch, total_epochs, options.lr_schedule)
 
         for state, label, weight in data:
             _apply_one(agent, state, label, weight, multiplier)
