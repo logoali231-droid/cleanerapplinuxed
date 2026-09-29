@@ -1,6 +1,10 @@
 """Paths, constants, and per-user config directory."""
 import os
-
+# Sentinels for confidence values that come from rules/screenshots, not the AI.
+# The AI's real confidence range is roughly 0–30, so anything over 100 is a
+# rule-derived value and should never be used for calibration.
+CONFIDENCE_RULE = 999.0
+CONFIDENCE_RULE_THRESHOLD = 900.0
 
 def _user_home():
     """Resolve the real user's home even when we're running as root."""
