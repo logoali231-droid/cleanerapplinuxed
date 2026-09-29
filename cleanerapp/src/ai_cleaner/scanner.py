@@ -3,10 +3,10 @@
 import os
 import time
 from pathlib import Path
-from .config import CONFIDENCE_RULE
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from .config import CONFIDENCE_RULE
 from .protection import (
     GAME_DIRS,
     GAME_EXTS,
@@ -18,7 +18,6 @@ from .protection import (
     sniff_file_kind,
 )
 from .state import extract_state, plain_reason
-
 
 
 # Screenshots older than this many days get flagged automatically.
@@ -55,6 +54,7 @@ class ScannerThread(QThread):
         self.rules = rules
         self.deep_mode = deep_mode
         self._running = True
+
     def stop(self):
         self._running = False
 
@@ -95,7 +95,7 @@ class ScannerThread(QThread):
                 t_last = now
         return n
 
-        def run(self):
+    def run(self):
         root = Path(self.root_path).expanduser().resolve()
         self.status.emit("Counting files…")
         total = self._count_files(root)
@@ -133,11 +133,11 @@ class ScannerThread(QThread):
 
         def flush_batch(force=False):
             if not pending:
-                return
+                return None
             now = time.time()
             if not force and len(pending) < BATCH_MIN_FILES \
                     and (now - last_batch) < BATCH_MIN_SECONDS:
-                return
+                return None
             batch = list(pending)
             self.files_found.emit(batch)
             if EMIT_LEGACY_FILE_SIGNAL:
