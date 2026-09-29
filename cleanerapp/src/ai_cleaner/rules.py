@@ -10,6 +10,10 @@ from .protection import expand_user_path
 
 
 class RulesManager:
+    # Bump this when you add/change entries in `defaults` below.
+    # Users whose marker file says an older version get re-seeded next launch.
+    SEED_VERSION = "1"
+
     def __init__(self, path=RULES_PATH):
         self.path = path
         self.rules = []
@@ -60,8 +64,13 @@ class RulesManager:
 
     # ------------------------------------------------------- defaults
     def seed_defaults_once(self):
-        if os.path.exists(DEFAULTS_SEEDED_FLAG):
-            return 0
+        try:
+            with open(DEFAULTS_SEEDED_FLAG, "r") as f:
+                if f.read().strip() == self.SEED_VERSION:
+                    return 0
+        except (FileNotFoundError, OSError):
+            pass
+
         added = 0
         existing = {(r.get("type"), r.get("value")) for r in self.rules}
 
@@ -126,7 +135,7 @@ class RulesManager:
             self.save()
         try:
             with open(DEFAULTS_SEEDED_FLAG, "w") as f:
-                f.write("seeded\n")
+                f.write(self.SEED_VERSION + "\n")
         except Exception:
             pass
         return added
