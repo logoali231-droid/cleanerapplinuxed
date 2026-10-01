@@ -1,5 +1,5 @@
 """Discretized state extraction for the RL agent."""
-from .protection import GAME_DIRS, GAME_PATH_HINTS, GAME_EXTS
+from .protection import GAME_DIRS, GAME_EXTS, GAME_PATH_HINTS
 
 
 def size_bucket(b):
@@ -33,13 +33,51 @@ def location_bucket(p):
     if any(g and g.lower() in p for g in GAME_DIRS):            return 3
     if any(h in p for h in GAME_PATH_HINTS):                    return 3
     if "/trash" in p:                                           return 4
-    if p.startswith("/usr/") or p.startswith("/etc/") or p.startswith("/var/"): return 5
+    if p.startswith("/usr/") or p.startswith("/etc/") or p.startswith("/var/"): return 5  # noqa: PIE810
     return 6
 
 
 def extract_state(path, size, age_days):
+    """
+    Return the 4-tuple state used to index the Q-table.
+
+    NOTE: this signature is deliberately frozen. If you ever need to add a
+    fifth dimension, do it as a *new* function (`extract_state_v2`) and
+    migrate Q-tables in `QLearningAgent.load()`, or you'll silently
+    invalidate every user's saved training.
+    """
     return (ext_bucket(path.suffix), size_bucket(size),
             age_bucket(age_days), location_bucket(path))
+
+
+# ----------------------------------------------------------------------
+# Content-kind bucket — an auxiliary signal, not a Q-table axis.
+# Used to:
+#   1) key the per-context calibration histogram
+#   2) decide how far to generalize a user override to neighbouring states
+# ----------------------------------------------------------------------
+
+KIND_BUCKET = {
+    "empty":          0,
+    "text-data":      0,
+    "text-log":       1,
+    "text-config":    2,
+    "binary":         3,
+    "binary-archive": 4,
+    "binary-magic":   5,
+    "office-doc":     6,
+    "critical":       7,
+    "text-code":      8,
+    "binary-exec":    8,
+    "unreadable":     8,
+}
+
+
+def kind_bucket(kind):
+    """Map a sniff_file_kind() result to a small integer. 0 = unknown."""
+    if not kind:
+        return 0
+    return KIND_BUCKET.get(kind, 0)
 
 
 def plain_reason(path, size, age):
