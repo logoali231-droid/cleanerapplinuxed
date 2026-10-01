@@ -1,5 +1,6 @@
 """Paths, constants, and per-user config directory."""
 import os
+
 # Sentinels for confidence values that come from rules/screenshots, not the AI.
 # The AI's real confidence range is roughly 0–30, so anything over 100 is a
 # rule-derived value and should never be used for calibration.
@@ -29,8 +30,9 @@ QTABLE_PATH = os.path.join(CONFIG_DIR, "qtable.pkl")
 RULES_PATH = os.path.join(CONFIG_DIR, "rules.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 DEFAULTS_SEEDED_FLAG = os.path.join(CONFIG_DIR, ".defaults_seeded")
+DECISIONS_PATH = os.path.join(CONFIG_DIR, "decisions.jsonl")
 
 try:
     os.makedirs(CONFIG_DIR, exist_ok=True)
-except Exception:
+except Exception:  # noqa: BLE001, S110
     pass

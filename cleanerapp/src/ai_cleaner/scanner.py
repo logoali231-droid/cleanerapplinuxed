@@ -172,6 +172,7 @@ class ScannerThread(QThread):
                             "size": st.st_size,
                             "age": int((time.time() - st.st_mtime) / 86400.0),
                             "state": None,
+                            "kind": None,
                             "confidence": CONFIDENCE_RULE,
                             "reason": rule.get("note")
                             or f"Your rule: {rule.get('value', '')}",
@@ -234,6 +235,7 @@ class ScannerThread(QThread):
                             "size": size,
                             "age": int(age),
                             "state": state,
+                            "kind": kind,
                             "confidence": conf,
                             "reason": plain_reason(fpath, size, int(age)),
                         }
