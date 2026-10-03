@@ -19,6 +19,7 @@ from .protection import (
     sniff_file_kind,
 )
 from .state import extract_state, plain_reason
+from .virtualmachines import VM_MIN_AGE_DAYS, is_vm_leftover
 
 # Screenshots older than this many days get flagged automatically.
 # Change to taste. 30 is a good balance — recent ones stay safe.
@@ -199,6 +200,38 @@ class ScannerThread(QThread):
                         pass
                     # Fresh jar — fall through to normal handling.
 
+                                # 0b. Leftover virtual machine files.
+                # Catches uninstalled launchers, orphaned VM disks, and
+                # large VM exports sitting in Downloads.
+                if fpath.suffix.lower() in (
+                    ".vdi", ".vmdk", ".vhd", ".vhdx", ".qcow2",
+                    ".qcow", ".img", ".ova", ".ovf", ".raw",
+                ):
+                    try:
+                        st = fpath.stat()
+                        age = (time.time() - st.st_mtime) / 86400.0
+                        if age >= VM_MIN_AGE_DAYS and is_vm_leftover(fpath):
+                            size = st.st_size
+                            state = extract_state(fpath, size, age)
+                            info = {
+                                "path": str(fpath),
+                                "name": fpath.name,
+                                "size": size,
+                                "age": int(age),
+                                "state": state,
+                                "kind": "vm-leftover",
+                                "confidence": CONFIDENCE_RULE,
+                                "reason": (
+                                    f"An old virtual-machine file "
+                                    f"({int(age)} days) — no launcher or VM "
+                                    "still uses it"
+                                ),
+                            }
+                            results.append(info)
+                            pending.append(info)
+                            continue
+                    except (PermissionError, OSError):
+                        pass
                 # 1. rules first
                 rule_action, rule = self.rules.match(fpath)
                 if rule_action == "protect":

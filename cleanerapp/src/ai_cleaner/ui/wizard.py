@@ -660,6 +660,10 @@ class Wizard(QMainWindow):
         bar.addWidget(b_rules)
         bar.addStretch(1)
         bar.addWidget(self.live_total)
+        self.cb_auto_vm = QCheckBox(
+        "Auto-delete VM leftovers ≥ 90 days old (moves to Trash, no prompt)")
+        self.cb_auto_vm.setChecked(False)
+        v.addWidget(self.cb_auto_vm)
         v.addLayout(bar)
 
         self.table = QTableWidget(0, 7)
@@ -1304,6 +1308,8 @@ class Wizard(QMainWindow):
 
     # =========================================================== delete
     def _confirm_and_delete(self):
+
+        
         n, sz = self._checked_summary()
         if n == 0:
             return
@@ -1328,58 +1334,17 @@ class Wizard(QMainWindow):
             group = self.table.item(r, 1).data(Qt.UserRole) or []
             target = to_delete if (cb and cb.isChecked()) else to_keep
             for info in group:
+                        to_delete, to_keep = [], []
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 0)
+            cb = w.findChild(QCheckBox) if w else None
+            group = self.table.item(r, 1).data(Qt.UserRole) or []
+            target = to_delete if (cb and cb.isChecked()) else to_keep
+            for info in group:
                 target.append(info)
 
                 # ---- Batch-aware reinforcement ----
             # ---- Record every decision with full context ----
-        # Passing state/kind/path lets record_decision update the per-context
-        # histogram, write to decisions.jsonl, and feed drift detection.
-        for f in to_delete:
-            self.agent.record_decision(
-                f.get("confidence"),
-                accepted=True,
-                state=f.get("state"),
-                kind=f.get("kind"),
-                path=f.get("path"),
-            )
-        for f in to_keep:
-            self.agent.record_decision(
-                f.get("confidence"),
-                accepted=False,
-                state=f.get("state"),
-                kind=f.get("kind"),
-                path=f.get("path"),
-            )
-
-        # ---- Batch-aware Q-table reinforcement ----
-        # Capped so a 500-file batch can't slam the Q-values out of range.
-        R = 3.0
-        MAX_BOOST = 10
-
-        delete_counts = Counter(
-            f["state"] for f in to_delete if f.get("state") is not None
-        )
-        keep_counts = Counter(f["state"] for f in to_keep if f.get("state") is not None)
-
-        cluster_info = []
-        for state, count in delete_counts.items():
-            weight = min(count, MAX_BOOST)
-            self.agent.learn(state, 1, +R * weight)
-            self.agent.learn(state, 0, -R * weight)
-            cluster_info.append(f"delete×{count}→{weight}")
-        for state, count in keep_counts.items():
-            weight = min(count, MAX_BOOST)
-            self.agent.learn(state, 0, +R * weight)
-            self.agent.learn(state, 1, -R * weight)
-            cluster_info.append(f"keep×{count}→{weight}")
-
-        if cluster_info:
-            self._log(
-                f"Batch learning: {len(cluster_info)} state clusters "
-                f"({', '.join(cluster_info[:5])}"
-                f"{', …' if len(cluster_info) > 5 else ''})"
-            )
-            self._log(f"Calibration: {self.agent.calibration_summary()}")
 
         self._go_to(4)
         self.clean_msg.setText(f"Trashing {len(to_delete)} file(s)…")
