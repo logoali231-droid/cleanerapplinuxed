@@ -24,6 +24,10 @@ from .state import extract_state, plain_reason
 # Change to taste. 30 is a good balance — recent ones stay safe.
 SCREENSHOT_MIN_AGE_DAYS = 30
 
+# Orphaned Minecraft mods younger than this are left alone.
+# A mod you downloaded yesterday might still be waiting to be installed.
+ORPHAN_MIN_AGE_DAYS = 30
+
 # ETA tuning
 ETA_ALPHA = 0.15  # EMA smoothing — lower = smoother, higher = more reactive
 ETA_WARMUP_FILES = 300  # don't show an ETA until this many files are scanned
@@ -163,6 +167,37 @@ class ScannerThread(QThread):
                     break
                 scanned += 1
                 fpath = Path(dirpath) / fname
+                # 0. Orphaned Minecraft mods — structural detection.
+                # Must run before user rules, otherwise a broad "protect
+                # ~/Downloads" rule would hide every leftover mod jar.
+                # Age gate: skip recent downloads — the user may still be
+                # installing or testing them.
+                if fpath.suffix.lower() == ".jar":
+                    try:
+                        st = fpath.stat()
+                        age = (time.time() - st.st_mtime) / 86400.0
+                        if age >= ORPHAN_MIN_AGE_DAYS and is_orphan_mod(fpath):
+                            size = st.st_size
+                            state = extract_state(fpath, size, age)
+                            info = {
+                                "path": str(fpath),
+                                "name": fpath.name,
+                                "size": size,
+                                "age": int(age),
+                                "state": state,
+                                "kind": "minecraft-mod",
+                                "confidence": CONFIDENCE_RULE,
+                                "reason": (
+                                    f"A mod you haven't used in {int(age)} days "
+                                    "— not loaded by any Minecraft instance"
+                                ),
+                            }
+                            results.append(info)
+                            pending.append(info)
+                            continue
+                    except (PermissionError, OSError):
+                        pass
+                    # Fresh jar — fall through to normal handling.
 
                 # 1. rules first
                 rule_action, rule = self.rules.match(fpath)
@@ -181,34 +216,6 @@ class ScannerThread(QThread):
                             "confidence": CONFIDENCE_RULE,
                             "reason": rule.get("note")
                             or f"Your rule: {rule.get('value', '')}",
-                        }
-                        results.append(info)
-                        pending.append(info)
-                    except (PermissionError, OSError):
-                        pass
-                    continue
-
-                    # 1b. Orphaned Minecraft mods — high-confidence cleanup.
-                # Mods you downloaded manually and never removed after
-                # changing modpacks.  Detected structurally, not by AI.
-                if fpath.suffix.lower() == ".jar" and is_orphan_mod(fpath):
-                    try:
-                        st = fpath.stat()
-                        size = st.st_size
-                        age = (time.time() - st.st_mtime) / 86400.0
-                        state = extract_state(fpath, size, age)
-                        info = {
-                            "path": str(fpath),
-                            "name": fpath.name,
-                            "size": size,
-                            "age": int(age),
-                            "state": state,
-                            "kind": "minecraft-mod",
-                            "confidence": CONFIDENCE_RULE,
-                            "reason": (
-                                f"A mod you haven't used in {int(age)} days "
-                                "— not loaded by any Minecraft instance"
-                            ),
                         }
                         results.append(info)
                         pending.append(info)
