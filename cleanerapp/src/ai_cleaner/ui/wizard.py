@@ -1395,15 +1395,13 @@ class Wizard(QMainWindow):
                 if (
                     any(g and g.lower() in pl for g in GAME_DIRS)
                     or any(h in pl for h in GAME_PATH_HINTS)
-                    or p.suffix.lower() in GAME_EXTS
                 ):
                     skipped += 1
                     continue
                 if p.exists() and p.is_file():
                     rc = subprocess.run(
                         ["gio", "trash", "--", str(p)],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
+                        check=False, stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     ).returncode
                     if rc == 0:
@@ -1411,9 +1409,10 @@ class Wizard(QMainWindow):
                         deleted += 1
                         freed += f["size"]
                     else:
-                        p.unlink()
-                        deleted += 1
-                        freed += f["size"]
+                        # Trash failed. Do NOT unlink silently — that's
+                        # a permanent delete on a cleaner that promises
+                        # recoverable deletion.
+                        failed += 1
                 else:
                     skipped += 1
             except Exception:  # noqa: BLE001
