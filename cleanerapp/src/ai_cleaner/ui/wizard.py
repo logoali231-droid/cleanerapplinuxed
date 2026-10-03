@@ -1,4 +1,5 @@
 """Main wizard window."""
+
 import os
 import subprocess
 import tempfile
@@ -29,8 +30,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from ..training import TrainingSession
-from .training_dialog import TrainingDialog
 
 from ..admin import (
     _admin_log,
@@ -41,17 +40,92 @@ from ..admin import (
 from ..agent import QLearningAgent, reinforce_agent_from_rule, train_agent
 from ..config import CONFIG_DIR, HOME, IS_ROOT
 from ..demo import create_demo_files
+from ..minecraft import has_any_instance, is_orphan_mod, list_instance_mod_dirs
 from ..rules import RulesManager
 from ..scanner import ScannerThread
+from ..training import TrainingSession
 from ..utils import age, duration, human, short_path
 from .rules_dialog import RulesDialog
 from .styles import QSS
+from .training_dialog import TrainingDialog
 from .widgets import card, make_stat, set_bigstat
 
 
 class Wizard(QMainWindow):
     STEPS = ["Welcome", "Choose folder", "Scan", "Review", "Clean up", "Done"]  # noqa: RUF012
 
+    def _find_orphan_mods(self):
+        if not has_any_instance():
+            QMessageBox.information(
+                self, "No Minecraft found",
+                "I couldn't find any PrismLauncher, MultiMC, PolyMC, or "
+                "vanilla Minecraft installation on this machine.\n\n"
+                "Without an instance to compare against, I can't safely "
+                "tell which mod jars are leftovers.")
+            return
+
+        instances = list_instance_mod_dirs()
+        default = os.path.join(HOME, "Downloads")
+        if not os.path.isdir(default):
+            default = HOME
+        d = QFileDialog.getExistingDirectory(
+            self, "Which folder holds your leftover mods?", default)
+        if not d:
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            orphans = []
+            total = 0
+            try:
+                names = os.listdir(d)
+            except OSError as e:
+                QMessageBox.critical(self, "Can't read folder", str(e))
+                return
+            for name in names:
+                if not name.lower().endswith(".jar"):
+                    continue
+                fp = os.path.join(d, name)
+                if not os.path.isfile(fp):
+                    continue
+                if is_orphan_mod(fp):
+                    try:
+                        size = os.path.getsize(fp)
+                    except OSError:
+                        size = 0
+                    orphans.append((fp, size))
+                    total += size
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not orphans:
+            QMessageBox.information(
+                self, "No orphaned mods",
+                f"Checked {d}\n\n"
+                f"Compared against {len(instances)} instance mod folder(s).\n\n"
+                "Every mod jar there is loaded by some instance — "
+                "nothing to clean up.")
+            return
+
+        lines = [f"Checked against {len(instances)} instance mod folder(s).\n"]
+        for fp, size in sorted(orphans, key=lambda x: -x[1])[:30]:
+            lines.append(f"  • {os.path.basename(fp)}  ({human(size)})")
+        if len(orphans) > 30:
+            lines.append(f"  … and {len(orphans) - 30} more")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Orphaned Minecraft mods")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"Found {len(orphans)} orphaned mod(s) in {d}.")
+        box.setInformativeText(f"Total: {human(total)}")
+        box.setDetailedText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
+        # Set it as scan target so a follow-up scan shows them all
+        self._set_folder(d)
+        self._go_to(1)
+    
     def __init__(self, admin_mode=False, start_folder=None, start_deep=False):
         super().__init__()
         base_title = "AI File Cleaner" + ("  —  Administrator" if IS_ROOT else "")
@@ -88,11 +162,15 @@ class Wizard(QMainWindow):
             QTimer.singleShot(400, self._start_scan)
 
         # =========================================================== training import
+
     def _import_training_file_dialog(self):
         d = QFileDialog.getOpenFileName(
-            self, "Pick a training file", HOME,
-                        "Training data (*.csv *.tsv *.json *.jsonl *.ndjson "
-            "*.parquet *.pq *.xlsx *.xls *.db *.sqlite *.sqlite3);;All files (*)")
+            self,
+            "Pick a training file",
+            HOME,
+            "Training data (*.csv *.tsv *.json *.jsonl *.ndjson "
+            "*.parquet *.pq *.xlsx *.xls *.db *.sqlite *.sqlite3);;All files (*)",
+        )
         if not d or not d[0]:
             return
         self._import_training_file(Path(d[0]))
@@ -101,41 +179,42 @@ class Wizard(QMainWindow):
         session = TrainingSession(path)
         if session.load_error:
             QMessageBox.critical(
-                self, "Couldn't read file",
-                f"{type(session.load_error).__name__}: {session.load_error}")
+                self,
+                "Couldn't read file",
+                f"{type(session.load_error).__name__}: {session.load_error}",
+            )
             return
         if not session.rows:
             QMessageBox.information(
-                self, "No data",
-                f"{path.name} contained no usable rows.")
+                self, "No data", f"{path.name} contained no usable rows."
+            )
             return
 
         dlg = TrainingDialog(session, self.agent, self)
         if dlg.exec_() == dlg.Accepted:
             self._refresh_agent_info()
             self._log(f"Imported training data from {path.name}")
+
     def _show_training_help(self):
         QMessageBox.information(
-            self, "Training data format",
+            self,
+            "Training data format",
             "Drop a file onto the window, or use Tools → Import training data.\n\n"
-
             "Supported formats: CSV, TSV, JSON, JSONL, NDJSON, "
             "Parquet, Excel, SQLite.\n\n"
-
             "Required columns (name-flexible, auto-detected):\n"
             "  • extension (or ext, file_type, …)\n"
             "  • size_bytes (or size, file_size, …)\n"
             "  • age_days (or age, days_old, …)\n"
             "  • location (or path, directory, folder, …)\n"
             "  • label (1=delete, 0=keep)\n\n"
-
             "Optional: weight (default 1.0)\n\n"
-
             "Or supply pre-bucketed data with these instead:\n"
             "  ext_bucket, size_bucket, age_bucket, loc_bucket\n\n"
-
             "The dialog auto-maps columns. You can override any mapping\n"
-            "in the import window if detection got it wrong.")
+            "in the import window if detection got it wrong.",
+        )
+
     # ============================================================== icon
     def _app_icon(self):
         pm = QPixmap(64, 64)
@@ -151,9 +230,20 @@ class Wizard(QMainWindow):
         return QIcon(pm)
 
         # =========================================================== drag-drop
-        TRAINING_EXTS = (".csv", ".tsv", ".json", ".jsonl", ".ndjson",  # noqa: F841
-                     ".parquet", ".pq", ".xlsx", ".xls",
-                     ".db", ".sqlite", ".sqlite3")
+        TRAINING_EXTS = (
+            ".csv",
+            ".tsv",
+            ".json",
+            ".jsonl",
+            ".ndjson",  
+            ".parquet",
+            ".pq",
+            ".xlsx",
+            ".xls",
+            ".db",
+            ".sqlite",
+            ".sqlite3",
+        )
 
     def _drag_training_file(self, event):
         if not event.mimeData().hasUrls():
@@ -204,6 +294,10 @@ class Wizard(QMainWindow):
         t.addAction("Show training format help", self._show_training_help)
 
         t.addSeparator()
+        t.addAction("🧹  Find orphaned Minecraft mods…",
+                    self._find_orphan_mods)
+
+        t.addSeparator()
         if not IS_ROOT:
             t.addAction("Relaunch as administrator…", self._relaunch_admin)
         t.addAction("Scan entire system…", self._preset_whole_system)
@@ -229,12 +323,14 @@ class Wizard(QMainWindow):
         sv.setSpacing(6)
 
         logo = QLabel("🧹  AI Cleaner")
-        logo.setStyleSheet("font-size:18px; font-weight:800; color:#1e2430; padding:4px 0 18px 0;")
+        logo.setStyleSheet(
+            "font-size:18px; font-weight:800; color:#1e2430; padding:4px 0 18px 0;"
+        )
         sv.addWidget(logo)
 
         self.step_labels = []
         for i, name in enumerate(self.STEPS):
-            lbl = QLabel(f"{i+1}.  {name}")
+            lbl = QLabel(f"{i + 1}.  {name}")
             lbl.setStyleSheet("color:#5a6478; padding:8px 12px; border-radius:6px;")
             sv.addWidget(lbl)
             self.step_labels.append(lbl)
@@ -304,7 +400,8 @@ class Wizard(QMainWindow):
             "I find files you probably don't need — old installers, forgotten "
             "downloads, cache leftovers — and remove them safely.\n\n"
             "You can teach me what to keep or flag anytime:  right-click any file, "
-            "or use  Tools → Teach the AI.")
+            "or use  Tools → Teach the AI."
+        )
         sub.setObjectName("SubHero")
         sub.setWordWrap(True)
         v.addWidget(t)
@@ -354,7 +451,9 @@ class Wizard(QMainWindow):
         cv.setSpacing(14)
 
         self.folder_label = QLabel("No folder selected yet")
-        self.folder_label.setStyleSheet("font-size:16px; font-weight:600; color:#1e2430;")
+        self.folder_label.setStyleSheet(
+            "font-size:16px; font-weight:600; color:#1e2430;"
+        )
         self.folder_label.setWordWrap(True)
         cv.addWidget(self.folder_label)
 
@@ -370,11 +469,16 @@ class Wizard(QMainWindow):
         b4 = QPushButton("🌍  Entire system")
         b4.setObjectName("Ghost")
         b4.clicked.connect(self._preset_whole_system)
-        row.addWidget(b1); row.addWidget(b2); row.addWidget(b3); row.addWidget(b4)
+        row.addWidget(b1)
+        row.addWidget(b2)
+        row.addWidget(b3)
+        row.addWidget(b4)
         row.addStretch(1)
         cv.addLayout(row)
 
-        self.deep_check = QCheckBox("Deep scan — include hidden files and system folders")
+        self.deep_check = QCheckBox(
+            "Deep scan — include hidden files and system folders"
+        )
         self.deep_check.stateChanged.connect(self._on_deep_toggle)
         cv.addWidget(self.deep_check)
 
@@ -386,10 +490,12 @@ class Wizard(QMainWindow):
             self.admin_method = None
         else:
             self.admin_check = QCheckBox(
-                "🔓  Run with admin rights  (needed for /var, /usr, /etc)")
+                "🔓  Run with admin rights  (needed for /var, /usr, /etc)"
+            )
             self.admin_check.setToolTip(
                 "When enabled, the app relaunches as root. You'll be asked for "
-                "your password once.")
+                "your password once."
+            )
             self.admin_check.stateChanged.connect(self._update_pick_warning)
             cv.addWidget(self.admin_check)
 
@@ -399,11 +505,13 @@ class Wizard(QMainWindow):
             lbl.setObjectName("Hint")
             mrow.addWidget(lbl)
             self.admin_method = QComboBox()
-            self.admin_method.addItems([
-                "Terminal  — most reliable, works on every Linux Mint setup",
-                "System dialog (pkexec)  — small system window",
-                "Graphical sudo (zenity/ssh-askpass)",
-            ])
+            self.admin_method.addItems(
+                [
+                    "Terminal  — most reliable, works on every Linux Mint setup",
+                    "System dialog (pkexec)  — small system window",
+                    "Graphical sudo (zenity/ssh-askpass)",
+                ]
+            )
             self.admin_method.setVisible(False)
             self.admin_method.currentIndexChanged.connect(self._update_pick_warning)
             mrow.addWidget(self.admin_method, 1)
@@ -419,7 +527,8 @@ class Wizard(QMainWindow):
             cv.addLayout(test_row)
 
             self.admin_check.stateChanged.connect(
-                lambda s: self.admin_method.setVisible(bool(s)))
+                lambda s: self.admin_method.setVisible(bool(s))
+            )
 
         self.warn_frame = QFrame()
         self.warn_frame.setObjectName("Warn")
@@ -434,8 +543,10 @@ class Wizard(QMainWindow):
 
         v.addWidget(c)
 
-        hint2 = QLabel("🔒  Games, PrismLauncher instances, Minecraft saves, and .jar "
-                       "files are always skipped — even in deep mode.")
+        hint2 = QLabel(
+            "🔒  Games, PrismLauncher instances, Minecraft saves, and .jar "
+            "files are always skipped — even in deep mode."
+        )
         hint2.setObjectName("Hint")
         hint2.setWordWrap(True)
         v.addWidget(hint2)
@@ -514,7 +625,9 @@ class Wizard(QMainWindow):
         t = QLabel("Here's what I found 🔍")
         t.setObjectName("Section")
         v.addWidget(t)
-        h = QLabel("Uncheck anything you want to keep.  Right-click a row to teach me a rule.")
+        h = QLabel(
+            "Uncheck anything you want to keep.  Right-click a row to teach me a rule."
+        )
         h.setObjectName("Hint")
         h.setWordWrap(True)
         v.addWidget(h)
@@ -551,7 +664,8 @@ class Wizard(QMainWindow):
 
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["✔", "File", "Location", "Count", "Size", "Age", "Why"])
+            ["✔", "File", "Location", "Count", "Size", "Age", "Why"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 40)
         self.table.setColumnWidth(2, 240)
@@ -626,8 +740,10 @@ class Wizard(QMainWindow):
         cw.addStretch(1)
         v.addLayout(cw)
 
-        note = QLabel("Deleted files are moved to Trash — you can restore them "
-                      "from Nemo if you change your mind.")
+        note = QLabel(
+            "Deleted files are moved to Trash — you can restore them "
+            "from Nemo if you change your mind."
+        )
         note.setObjectName("Hint")
         note.setAlignment(Qt.AlignCenter)
         v.addWidget(note)
@@ -650,8 +766,10 @@ class Wizard(QMainWindow):
         self.stack.setCurrentIndex(i)
         for j, lbl in enumerate(self.step_labels):
             if j == i:
-                lbl.setStyleSheet("color:white; background:#2f7ad6; font-weight:700;"
-                                  "padding:8px 12px; border-radius:6px;")
+                lbl.setStyleSheet(
+                    "color:white; background:#2f7ad6; font-weight:700;"
+                    "padding:8px 12px; border-radius:6px;"
+                )
             else:
                 lbl.setStyleSheet("color:#5a6478; padding:8px 12px; border-radius:6px;")
         self.btn_back.setVisible(i not in (0, 2, 4, 5))
@@ -723,15 +841,21 @@ class Wizard(QMainWindow):
     def _update_pick_warning(self):
         msgs = []
         if self.deep_mode:
-            msgs.append("⚠  Deep scan is on — hidden folders and system paths are walked. "
-                        "This can take 5–30 minutes.")
+            msgs.append(
+                "⚠  Deep scan is on — hidden folders and system paths are walked. "
+                "This can take 5–30 minutes."
+            )
         if self.admin_check is not None and self.admin_check.isChecked():
             idx = self.admin_method.currentIndex() if self.admin_method else 0
             if idx == 0:
-                msgs.append("🔓  Admin mode: Terminal. A terminal window will open "
-                            "and sudo will ask for your password there.")
+                msgs.append(
+                    "🔓  Admin mode: Terminal. A terminal window will open "
+                    "and sudo will ask for your password there."
+                )
             elif idx == 1:
-                msgs.append("🔓  Admin mode: system dialog (pkexec). Type password once.")
+                msgs.append(
+                    "🔓  Admin mode: system dialog (pkexec). Type password once."
+                )
             else:
                 msgs.append("🔓  Admin mode: graphical sudo. Needs zenity installed.")
         if msgs:
@@ -757,9 +881,11 @@ class Wizard(QMainWindow):
             QMessageBox.critical(self, "Oops", f"Couldn't create demo files:\n{e}")
             return
         QMessageBox.information(
-            self, "Demo files created 🎉",
+            self,
+            "Demo files created 🎉",
             f"Created {info['junk']} junk, {info['keepers']} keepers, "
-            f"{info['protected']} protected.\n\nLocation:\n{info['path']}")
+            f"{info['protected']} protected.\n\nLocation:\n{info['path']}",
+        )
         self._set_folder(info["path"])
         self._go_to(1)
 
@@ -773,9 +899,11 @@ class Wizard(QMainWindow):
             dlg.exec_()
         except Exception as e:  # noqa: BLE001
             import traceback
+
             traceback.print_exc()
-            QMessageBox.critical(self, "Rules manager failed",
-                                 f"{type(e).__name__}: {e}")
+            QMessageBox.critical(
+                self, "Rules manager failed", f"{type(e).__name__}: {e}"
+            )
             return
         for rule in self.rules.rules:
             reinforce_agent_from_rule(self.agent, rule)
@@ -798,9 +926,9 @@ class Wizard(QMainWindow):
             self._refresh_agent_info()
         except Exception as e:  # noqa: BLE001
             import traceback
+
             traceback.print_exc()
-            QMessageBox.critical(self, "Couldn't add rule",
-                                 f"{type(e).__name__}: {e}")
+            QMessageBox.critical(self, "Couldn't add rule", f"{type(e).__name__}: {e}")
 
     def _apply_rules_to_table(self):
         removed = 0
@@ -838,36 +966,55 @@ class Wizard(QMainWindow):
 
         menu = QMenu(self)
         keep = menu.addMenu("🛡  Always keep…")
-        keep.addAction("This exact file",
-                       lambda: self._quick_rule("glob", str(path), "protect"))
-        keep.addAction("Every file in this folder",
-                       lambda: self._quick_rule("folder", parent, "protect"))
+        keep.addAction(
+            "This exact file", lambda: self._quick_rule("glob", str(path), "protect")
+        )
+        keep.addAction(
+            "Every file in this folder",
+            lambda: self._quick_rule("folder", parent, "protect"),
+        )
         if ext:
-            keep.addAction(f"Every {ext} file on the system",
-                           lambda: self._quick_rule("extension", ext, "protect"))
+            keep.addAction(
+                f"Every {ext} file on the system",
+                lambda: self._quick_rule("extension", ext, "protect"),
+            )
         if len(stem) >= 4:
-            keep.addAction(f"Names containing “{stem[:12]}”",
-                           lambda: self._quick_rule("name_contains", stem, "protect"))
+            keep.addAction(
+                f"Names containing “{stem[:12]}”",
+                lambda: self._quick_rule("name_contains", stem, "protect"),
+            )
 
         flag = menu.addMenu("🗑  Always suggest deleting…")
-        flag.addAction("This exact file",
-                       lambda: self._quick_rule("glob", str(path), "flag"))
-        flag.addAction("Every file in this folder",
-                       lambda: self._quick_rule("folder", parent, "flag"))
+        flag.addAction(
+            "This exact file", lambda: self._quick_rule("glob", str(path), "flag")
+        )
+        flag.addAction(
+            "Every file in this folder",
+            lambda: self._quick_rule("folder", parent, "flag"),
+        )
         if ext:
-            flag.addAction(f"Every {ext} file on the system",
-                           lambda: self._quick_rule("extension", ext, "flag"))
+            flag.addAction(
+                f"Every {ext} file on the system",
+                lambda: self._quick_rule("extension", ext, "flag"),
+            )
         if len(stem) >= 4:
-            flag.addAction(f"Names containing “{stem[:12]}”",
-                           lambda: self._quick_rule("name_contains", stem, "flag"))
+            flag.addAction(
+                f"Names containing “{stem[:12]}”",
+                lambda: self._quick_rule("name_contains", stem, "flag"),
+            )
 
         menu.addSeparator()
         menu.addAction("Open rules manager…", self._manage_rules)
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def _quick_rule(self, rtype, value, action):
-        rule = {"type": rtype, "value": value, "action": action,
-                "note": "", "enabled": True}
+        rule = {
+            "type": rtype,
+            "value": value,
+            "action": action,
+            "note": "",
+            "enabled": True,
+        }
         verb = "always keep" if action == "protect" else "always suggest deleting"
         if not hasattr(self.rules, "settings") or self.rules.settings is None:
             self.rules.settings = {"skip_rule_confirmation": False}
@@ -880,7 +1027,8 @@ class Wizard(QMainWindow):
         box.setText(
             f"Add a rule to {verb}:\n\n"
             f"    {RulesManager.describe(rule)}\n\n"
-            "The AI will learn from this too.")
+            "The AI will learn from this too."
+        )
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.Yes)
         cb = QCheckBox("Don't ask me this again — add future rules automatically")
@@ -897,13 +1045,21 @@ class Wizard(QMainWindow):
     def _start_scan(self):
         if not self.folder:
             return
-        if self.admin_check is not None and self.admin_check.isChecked() and not IS_ROOT:
+        if (
+            self.admin_check is not None
+            and self.admin_check.isChecked()
+            and not IS_ROOT
+        ):
             method = self._current_admin_method()
-            if QMessageBox.question(
-                self, "Restart as administrator?",
-                f"Method: {method}\n\n"
-                "The app will try to open a root instance.",
-                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            if (
+                QMessageBox.question(
+                    self,
+                    "Restart as administrator?",
+                    f"Method: {method}\n\nThe app will try to open a root instance.",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                != QMessageBox.Yes
+            ):
                 return
             self._do_admin_relaunch(self.folder, self.deep_mode, method)
             return
@@ -919,8 +1075,9 @@ class Wizard(QMainWindow):
         set_bigstat(self.live_size, "0 MB")
         self._go_to(2)
 
-        self.scanner = ScannerThread(self.folder, self.agent, self.rules,
-                                     deep_mode=self.deep_mode)
+        self.scanner = ScannerThread(
+            self.folder, self.agent, self.rules, deep_mode=self.deep_mode
+        )
         self.scanner.progress.connect(self._on_progress)
         self.scanner.file_found.connect(self._on_file_found)
         self.scanner.finished_scan.connect(self._on_scan_done)
@@ -928,8 +1085,10 @@ class Wizard(QMainWindow):
         self.scanner.start()
 
     def _do_admin_relaunch(self, folder, deep, method):
-        sig = os.path.join(tempfile.gettempdir(),
-                           f"ai-cleaner-started-{os.getpid()}-{int(time.time())}")
+        sig = os.path.join(
+            tempfile.gettempdir(),
+            f"ai-cleaner-started-{os.getpid()}-{int(time.time())}",
+        )
         try:
             if os.path.exists(sig):
                 os.remove(sig)
@@ -937,8 +1096,9 @@ class Wizard(QMainWindow):
             pass
 
         _admin_log(f"--- new launch, method={method}, signal={sig} ---")
-        ok, err = relaunch_as_admin(folder=folder, deep=deep, method=method,
-                                    signal_file=sig, parent=self)
+        ok, err = relaunch_as_admin(
+            folder=folder, deep=deep, method=method, signal_file=sig, parent=self
+        )
         if not ok:
             _admin_log(f"launch returned False: {err}")
             QMessageBox.critical(self, "Couldn't start admin instance", err)
@@ -947,9 +1107,11 @@ class Wizard(QMainWindow):
         wait = QMessageBox(self)
         wait.setWindowTitle("Waiting for admin instance")
         wait.setIcon(QMessageBox.Information)
-        wait.setText("A root window should appear shortly.\n\n"
-                     "Complete the password prompt there.\n\n"
-                     "This window closes automatically once it starts.")
+        wait.setText(
+            "A root window should appear shortly.\n\n"
+            "Complete the password prompt there.\n\n"
+            "This window closes automatically once it starts."
+        )
         wait.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
 
         deadline = time.time() + 25.0
@@ -982,10 +1144,12 @@ class Wizard(QMainWindow):
         else:
             _admin_log("child did NOT confirm within 25s")
             QMessageBox.warning(
-                self, "Admin instance didn't start",
+                self,
+                "Admin instance didn't start",
                 "The root window didn't appear.\n\n"
                 "This window stays open. Try a different method.\n\n"
-                f"Log: {os.path.join(CONFIG_DIR, 'admin-launch.log')}")
+                f"Log: {os.path.join(CONFIG_DIR, 'admin-launch.log')}",
+            )
 
     def _on_progress(self, scanned, total, cur_dir, eta, is_counting):
         if is_counting:
@@ -1024,12 +1188,19 @@ class Wizard(QMainWindow):
         self.scan_status.setText("Cancelled.")
         self._go_to(1)
 
+    
     def _on_scan_done(self, files):
         self.scan_results = files
+        if self.agent.calibration_drift():
+            self._log("Calibration drift detected — the AI is re-learning "
+                      "your taste on the next scan.")
         self._fill_review_table()
         if not files:
-            QMessageBox.information(self, "Nothing to clean! 🎉",
-                                    "I didn't find anything worth removing here.")
+            QMessageBox.information(
+                self,
+                "Nothing to clean! 🎉",
+                "I didn't find anything worth removing here.",
+            )
             self._show_done(0, 0, 0)
             self._go_to(5)
         else:
@@ -1039,15 +1210,15 @@ class Wizard(QMainWindow):
     def _fill_review_table(self):
         self.table.setRowCount(0)
         self.table.setHorizontalHeaderLabels(
-            ["✔", "File", "Location", "Count", "Size", "Age", "Why"])
+            ["✔", "File", "Location", "Count", "Size", "Age", "Why"]
+        )
 
         groups = {}
         for info in self.scan_results:
             key = (info["name"], round(info["size"] / 1024), info["age"])
             groups.setdefault(key, []).append(info)
 
-        ordered = sorted(groups.values(),
-                         key=lambda g: -sum(f["size"] for f in g))
+        ordered = sorted(groups.values(), key=lambda g: -sum(f["size"] for f in g))
 
         for group in ordered:
             r = self.table.rowCount()
@@ -1071,15 +1242,16 @@ class Wizard(QMainWindow):
                 label = f"📄  {first['name']}   ×{count}"
             name_item = QTableWidgetItem(label)
             name_item.setData(Qt.UserRole, group)
-            name_item.setToolTip("\n".join(f["path"] for f in group[:20])
-                                 + ("\n…" if count > 20 else ""))
+            name_item.setToolTip(
+                "\n".join(f["path"] for f in group[:20]) + ("\n…" if count > 20 else "")
+            )
             self.table.setItem(r, 1, name_item)
 
             parents = sorted({str(Path(f["path"]).parent) for f in group})
             if len(parents) == 1:
                 loc_text = short_path(parents[0], 55)
             else:
-                loc_text = f"{short_path(parents[0], 35)}  (+{len(parents)-1} more)"
+                loc_text = f"{short_path(parents[0], 35)}  (+{len(parents) - 1} more)"
             loc = QTableWidgetItem(loc_text)
             loc.setForeground(QColor("#5a6478"))
             loc.setToolTip("\n".join(parents))
@@ -1135,12 +1307,18 @@ class Wizard(QMainWindow):
         n, sz = self._checked_summary()
         if n == 0:
             return
-        if QMessageBox.question(
-            self, "Ready to clean up?",
-            f"I'll move {n:,} file(s) to Trash, freeing about {human(sz)}.\n\n"
-            "You can restore them from Nemo if you change your mind.\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "Ready to clean up?",
+                f"I'll move {n:,} file(s) to Trash, freeing about {human(sz)}.\n\n"
+                "You can restore them from Nemo if you change your mind.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
 
         to_delete, to_keep = [], []
@@ -1153,21 +1331,36 @@ class Wizard(QMainWindow):
                 target.append(info)
 
                 # ---- Batch-aware reinforcement ----
-        # Group decisions by state so 20 deleted screenshots produce one
-        # strong update instead of 20 weak identical ones. Capped so a
-        # 500-file batch doesn't slam the Q-values out of range.
+            # ---- Record every decision with full context ----
+        # Passing state/kind/path lets record_decision update the per-context
+        # histogram, write to decisions.jsonl, and feed drift detection.
+        for f in to_delete:
+            self.agent.record_decision(
+                f.get("confidence"),
+                accepted=True,
+                state=f.get("state"),
+                kind=f.get("kind"),
+                path=f.get("path"),
+            )
+        for f in to_keep:
+            self.agent.record_decision(
+                f.get("confidence"),
+                accepted=False,
+                state=f.get("state"),
+                kind=f.get("kind"),
+                path=f.get("path"),
+            )
+
+        # ---- Batch-aware Q-table reinforcement ----
+        # Capped so a 500-file batch can't slam the Q-values out of range.
         R = 3.0
         MAX_BOOST = 10
 
         delete_counts = Counter(
-            f["state"] for f in to_delete if f.get("state") is not None)
-        keep_counts = Counter(
-            f["state"] for f in to_keep if f.get("state") is not None)
-                # --- record calibration data (one entry per file, not per state) ---
-        for f in to_delete:
-            self.agent.record_decision(f.get("confidence"), accepted=True)
-        for f in to_keep:
-            self.agent.record_decision(f.get("confidence"), accepted=False)
+            f["state"] for f in to_delete if f.get("state") is not None
+        )
+        keep_counts = Counter(f["state"] for f in to_keep if f.get("state") is not None)
+
         cluster_info = []
         for state, count in delete_counts.items():
             weight = min(count, MAX_BOOST)
@@ -1181,9 +1374,11 @@ class Wizard(QMainWindow):
             cluster_info.append(f"keep×{count}→{weight}")
 
         if cluster_info:
-            self._log(f"Batch learning: {len(cluster_info)} state clusters "
-                      f"({', '.join(cluster_info[:5])}"
-                      f"{', …' if len(cluster_info) > 5 else ''})")
+            self._log(
+                f"Batch learning: {len(cluster_info)} state clusters "
+                f"({', '.join(cluster_info[:5])}"
+                f"{', …' if len(cluster_info) > 5 else ''})"
+            )
             self._log(f"Calibration: {self.agent.calibration_summary()}")
 
         self._go_to(4)
@@ -1197,15 +1392,18 @@ class Wizard(QMainWindow):
             try:
                 p = Path(f["path"])
                 pl = str(p).lower()
-                if any(g and g.lower() in pl for g in GAME_DIRS) \
-                   or any(h in pl for h in GAME_PATH_HINTS) \
-                   or p.suffix.lower() in GAME_EXTS:
+                if (
+                    any(g and g.lower() in pl for g in GAME_DIRS)
+                    or any(h in pl for h in GAME_PATH_HINTS)
+                    or p.suffix.lower() in GAME_EXTS
+                ):
                     skipped += 1
                     continue
                 if p.exists() and p.is_file():
                     rc = subprocess.run(
                         ["gio", "trash", "--", str(p)],
-                        check=False, stdout=subprocess.DEVNULL,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     ).returncode
                     if rc == 0:
@@ -1234,7 +1432,8 @@ class Wizard(QMainWindow):
 
     def _show_done(self, freed, deleted, kept):
         self.done_msg.setText(
-            f"You just freed up {human(freed)} by removing {deleted} file(s).")
+            f"You just freed up {human(freed)} by removing {deleted} file(s)."
+        )
         set_bigstat(self.done_freed, human(freed))
         set_bigstat(self.done_files, f"{deleted:,}")
         set_bigstat(self.done_kept, f"{kept:,}")
@@ -1244,13 +1443,19 @@ class Wizard(QMainWindow):
     def _restore_last_batch(self):
         batch = getattr(self, "_last_trashed", [])
         if not batch:
-            QMessageBox.information(self, "Nothing to restore",
-                                    "No files were trashed in this session.")
+            QMessageBox.information(
+                self, "Nothing to restore", "No files were trashed in this session."
+            )
             return
-        if QMessageBox.question(
-            self, "Restore files?",
-            f"Restore {len(batch)} file(s) from Trash back to their original locations?",
-            QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "Restore files?",
+                f"Restore {len(batch)} file(s) from Trash back to their original locations?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
         restored = 0
         failed = 0
@@ -1258,7 +1463,8 @@ class Wizard(QMainWindow):
             try:
                 rc = subprocess.run(
                     ["gio", "trash", "--restore", "--", path],
-                    check=False, stdout=subprocess.DEVNULL,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 ).returncode
                 if rc == 0:
@@ -1267,8 +1473,9 @@ class Wizard(QMainWindow):
                     failed += 1
             except Exception:  # noqa: BLE001
                 failed += 1
-        QMessageBox.information(self, "Done",
-                                f"Restored {restored} file(s). {failed} failed.")
+        QMessageBox.information(
+            self, "Done", f"Restored {restored} file(s). {failed} failed."
+        )
         self.btn_restore.setEnabled(False)
         self._last_trashed = []
 
@@ -1282,15 +1489,22 @@ class Wizard(QMainWindow):
         if not silent:
             QApplication.restoreOverrideCursor()
             QMessageBox.information(
-                self, "AI retrained",
-                f"Trained on {episodes:,} examples in {time.time()-t0:.1f}s.")
+                self,
+                "AI retrained",
+                f"Trained on {episodes:,} examples in {time.time() - t0:.1f}s.",
+            )
         self._refresh_agent_info()
 
     def _reset_agent(self):
-        if QMessageBox.question(
-            self, "Reset AI",
-            "Forget everything the AI has learned?  (Your rules stay.)",
-            QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "Reset AI",
+                "Forget everything the AI has learned?  (Your rules stay.)",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
         self.agent.reset()
         self._train_agent(20000)
@@ -1301,15 +1515,16 @@ class Wizard(QMainWindow):
 
     def _refresh_agent_info(self):
         self.agent_info.setText(
-            f"AI has seen {self.agent.visited_states():,} situations.")
+            f"AI has seen {self.agent.visited_states():,} situations."
+        )
         n = len(self.rules.rules)
         if n == 0:
             self.rules_info.setText("No rules yet — right-click a file to add one.")
         else:
             enabled = sum(1 for r in self.rules.rules if r.get("enabled", True))
             self.rules_info.setText(
-                f"📋 {enabled} of {n} rule(s) active.\n"
-                "Manage in Tools → Teach the AI.")
+                f"📋 {enabled} of {n} rule(s) active.\nManage in Tools → Teach the AI."
+            )
 
     def _log(self, m):
         print(f"[{time.strftime('%H:%M:%S')}] {m}")
@@ -1319,12 +1534,17 @@ class Wizard(QMainWindow):
         folder = self.folder or HOME
         deep = self.deep_mode
         method = self._current_admin_method()
-        if QMessageBox.question(
-            self, "Relaunch as administrator?",
-            f"Method: {method}\nFolder: {folder}\n"
-            f"Deep scan: {'on' if deep else 'off'}\n\n"
-            "The app will try to open a root instance.",
-            QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "Relaunch as administrator?",
+                f"Method: {method}\nFolder: {folder}\n"
+                f"Deep scan: {'on' if deep else 'off'}\n\n"
+                "The app will try to open a root instance.",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
             return
         self._do_admin_relaunch(folder, deep, method)
 
@@ -1335,8 +1555,9 @@ class Wizard(QMainWindow):
         if method == "terminal":
             term = find_terminal()
             if not term:
-                QMessageBox.critical(self, "No terminal",
-                                     "Couldn't find a terminal emulator.")
+                QMessageBox.critical(
+                    self, "No terminal", "Couldn't find a terminal emulator."
+                )
                 return
             fd2, tmp = tempfile.mkstemp(prefix="ai-cleaner-testterm-", suffix=".sh")
             os.close(fd2)
@@ -1354,45 +1575,55 @@ class Wizard(QMainWindow):
                 QMessageBox.critical(self, "Launch failed", str(e))
                 return
             QMessageBox.information(
-                self, "Terminal opened",
+                self,
+                "Terminal opened",
                 "A terminal window just opened.\n\n"
                 "Type your password there. If you see  uid=0(root)…, "
-                "the terminal method works.")
+                "the terminal method works.",
+            )
         else:
             QMessageBox.information(
-                self, "Test",
+                self,
+                "Test",
                 "For pkexec / askpass, testing opens the real dialog. "
                 "Use the scan itself — log at:\n"
-                f"{os.path.join(CONFIG_DIR, 'admin-launch.log')}")
+                f"{os.path.join(CONFIG_DIR, 'admin-launch.log')}",
+            )
 
     # =========================================================== help
     def _show_help(self):
         QMessageBox.information(
-            self, "How it works",
+            self,
+            "How it works",
             "The cleaner uses reinforcement learning to decide, for each file, "
             "whether to KEEP it or DELETE it.\n\n"
             "🛡  Protected forever: Steam, Lutris, Heroic, Wine, "
             "PrismLauncher / MultiMC instances, .minecraft, all .jar files, "
             "and game data (.pak, .sav, .vpk, .bsa…).\n\n"
             "Teach me anytime: right-click a file in the Review list, or use "
-            "Tools → Teach the AI.")
+            "Tools → Teach the AI.",
+        )
 
     def _show_teach_guide(self):
         QMessageBox.information(
-            self, "Teach the AI",
+            self,
+            "Teach the AI",
             "Two ways to teach me:\n\n"
             "  1.  Right-click any file in the Review list.\n"
             "  2.  Tools → Teach the AI — manage rules…\n\n"
             "For folder rules, click  📁 Browse…  instead of typing the path.\n\n"
-            "Rules take priority over the AI. Extension rules also nudge the AI.")
+            "Rules take priority over the AI. Extension rules also nudge the AI.",
+        )
 
     def _show_about(self):
         admin = "  (administrator)" if IS_ROOT else ""
         QMessageBox.about(
-            self, "About AI File Cleaner",
+            self,
+            "About AI File Cleaner",
             f"<h3>AI File Cleaner — Wizard Edition v7{admin}</h3>"
             "<p>RL-powered cleaner with in-app rule training and admin mode.</p>"
-            "<p>Runs entirely on your machine. No network, no cloud.</p>")
+            "<p>Runs entirely on your machine. No network, no cloud.</p>",
+        )
 
     # =========================================================== events
     def closeEvent(self, e):
@@ -1441,8 +1672,6 @@ def main():
     app.setApplicationName("AI File Cleaner")
     app.setDesktopFileName("ai-file-cleaner")
     app.setStyleSheet(QSS)
-    w = Wizard(admin_mode=args.admin,
-               start_folder=args.folder,
-               start_deep=args.deep)
+    w = Wizard(admin_mode=args.admin, start_folder=args.folder, start_deep=args.deep)
     w.show()
     sys.exit(app.exec_())

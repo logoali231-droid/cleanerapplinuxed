@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from .config import CONFIDENCE_RULE
+from .minecraft import is_orphan_mod
 from .protection import (
     GAME_DIRS,
     GAME_EXTS,
@@ -19,15 +20,14 @@ from .protection import (
 )
 from .state import extract_state, plain_reason
 
-
 # Screenshots older than this many days get flagged automatically.
 # Change to taste. 30 is a good balance — recent ones stay safe.
 SCREENSHOT_MIN_AGE_DAYS = 30
 
 # ETA tuning
-ETA_ALPHA = 0.15           # EMA smoothing — lower = smoother, higher = more reactive
-ETA_WARMUP_FILES = 300     # don't show an ETA until this many files are scanned
-ETA_WARMUP_SECONDS = 2.0   # ...or this many seconds, whichever is later
+ETA_ALPHA = 0.15  # EMA smoothing — lower = smoother, higher = more reactive
+ETA_WARMUP_FILES = 300  # don't show an ETA until this many files are scanned
+ETA_WARMUP_SECONDS = 2.0  # ...or this many seconds, whichever is later
 
 # Batching config — how many files to accumulate before firing a Qt signal.
 # Larger = fewer signals but chunkier UI updates.
@@ -42,8 +42,8 @@ EMIT_LEGACY_FILE_SIGNAL = True
 
 class ScannerThread(QThread):
     progress = pyqtSignal(int, int, str, float, bool)
-    file_found = pyqtSignal(dict)     # legacy, per-item — will be removed
-    files_found = pyqtSignal(list)    # new, batched
+    file_found = pyqtSignal(dict)  # legacy, per-item — will be removed
+    files_found = pyqtSignal(list)  # new, batched
     finished_scan = pyqtSignal(list)
     status = pyqtSignal(str)
 
@@ -110,9 +110,11 @@ class ScannerThread(QThread):
 
         manual = float(self.rules.settings.get("min_confidence", -1))
         if manual < 0:
+            # This is only the *fallback* threshold. The scanner uses
+            # dynamic_threshold(state=state) per file when this is < 0.
             min_confidence = self.agent.dynamic_threshold()
             self.status.emit(
-                f"AI-derived confidence threshold: {min_confidence:.2f} "
+                f"AI threshold (fallback): {min_confidence:.2f} "
                 f"({self.agent.calibration_summary()})"
             )
         else:
@@ -135,8 +137,11 @@ class ScannerThread(QThread):
             if not pending:
                 return None
             now = time.time()
-            if not force and len(pending) < BATCH_MIN_FILES \
-                    and (now - last_batch) < BATCH_MIN_SECONDS:
+            if (
+                not force
+                and len(pending) < BATCH_MIN_FILES
+                and (now - last_batch) < BATCH_MIN_SECONDS
+            ):
                 return None
             batch = list(pending)
             self.files_found.emit(batch)
@@ -183,6 +188,34 @@ class ScannerThread(QThread):
                         pass
                     continue
 
+                    # 1b. Orphaned Minecraft mods — high-confidence cleanup.
+                # Mods you downloaded manually and never removed after
+                # changing modpacks.  Detected structurally, not by AI.
+                if fpath.suffix.lower() == ".jar" and is_orphan_mod(fpath):
+                    try:
+                        st = fpath.stat()
+                        size = st.st_size
+                        age = (time.time() - st.st_mtime) / 86400.0
+                        state = extract_state(fpath, size, age)
+                        info = {
+                            "path": str(fpath),
+                            "name": fpath.name,
+                            "size": size,
+                            "age": int(age),
+                            "state": state,
+                            "kind": "minecraft-mod",
+                            "confidence": CONFIDENCE_RULE,
+                            "reason": (
+                                f"A mod you haven't used in {int(age)} days "
+                                "— not loaded by any Minecraft instance"
+                            ),
+                        }
+                        results.append(info)
+                        pending.append(info)
+                    except (PermissionError, OSError):
+                        pass
+                    continue
+
                 # 2. hardcoded protection + sniffing
                 try:
                     if not fpath.is_file():
@@ -195,8 +228,13 @@ class ScannerThread(QThread):
                         continue
 
                     kind, _preview = sniff_file_kind(fpath)
-                    if kind in ("text-code", "binary-exec", "unreadable",
-                                "critical", "office-doc"):
+                    if kind in (
+                        "text-code",
+                        "binary-exec",
+                        "unreadable",
+                        "critical",
+                        "office-doc",
+                    ):
                         continue
 
                     st = fpath.stat()
@@ -227,7 +265,13 @@ class ScannerThread(QThread):
 
                     if self.agent.act(state, explore=False) == 1:
                         conf = self.agent.confidence(state)
-                        if min_confidence > 0 and conf < min_confidence:
+                        # Prefer the per-context threshold when the AI is
+                        # choosing; fall back to the global one otherwise.
+                        if manual < 0:
+                            threshold = self.agent.dynamic_threshold(state=state)
+                        else:
+                            threshold = min_confidence
+                        if threshold > 0 and conf < threshold:
                             continue
                         info = {
                             "path": str(fpath),
@@ -261,8 +305,9 @@ class ScannerThread(QThread):
                         if ema_rate is None:
                             ema_rate = instant_rate
                         else:
-                            ema_rate = (ETA_ALPHA * instant_rate
-                                        + (1 - ETA_ALPHA) * ema_rate)
+                            ema_rate = (
+                                ETA_ALPHA * instant_rate + (1 - ETA_ALPHA) * ema_rate
+                            )
                         last_sample_scanned = scanned
                         last_sample_time = now
 

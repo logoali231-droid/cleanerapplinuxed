@@ -70,6 +70,7 @@ KIND_BUCKET = {
     "text-code":      8,
     "binary-exec":    8,
     "unreadable":     8,
+    "minecraft-mod":  9,
 }
 
 

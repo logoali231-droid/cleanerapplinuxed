@@ -7,8 +7,8 @@ import pickle
 import random
 import time
 
-from .config import QTABLE_PATH, CONFIDENCE_RULE_THRESHOLD, DECISIONS_PATH
-from .state import ext_bucket, location_bucket, kind_bucket
+from .config import CONFIDENCE_RULE_THRESHOLD, DECISIONS_PATH, QTABLE_PATH
+from .state import ext_bucket, kind_bucket, location_bucket
 
 
 class SyntheticFileEnv:
@@ -320,17 +320,12 @@ class QLearningAgent:
                 f"threshold {thr:.2f}{drift}")
 
     def calibration_report(self):
-        """
-        Return a small dict summarizing calibration quality.
-        Brier score is the mean squared error between predicted confidence
-        (normalized) and actual acceptance — lower is better.
-        """
         if not self.conf_stats:
             return {"n": 0}
-        # Normalize confidence: assume the AI's practical range is 0–30.
-        # A more principled version would track the observed max, but for a
-        # UI progress metric a fixed scale is stable and predictable.
-        norm = 30.0
+        # Normalize against the largest bucket we've actually seen, floored
+        # at 1.0 so a single low-confidence decision doesn't zero out.
+        max_b = max((b for b in self.conf_stats if b > 0), default=1.0)
+        norm = max(1.0, max_b)
         n = 0
         brier = 0.0
         for b, (shown, accepted) in self.conf_stats.items():
