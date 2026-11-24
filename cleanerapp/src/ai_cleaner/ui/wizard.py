@@ -1119,327 +1119,537 @@ class Wizard(QMainWindow):
 
         set_bigstat(self.live_files, f"{n:,}")
         set_bigstat(self.live_size, human(total))
-        def _cancel_scan(self):
-            if self.scanner:
-                self.scanner.stop()
-                self.scanner.wait(1500)
-            self.scan_status.setText("Cancelled.")
-            self._go_to(1)
+    def _cancel_scan(self):
+        if self.scanner:
+            self.scanner.stop()
+            self.scanner.wait(1500)
+        self.scan_status.setText("Cancelled.")
+        self._go_to(1)
 
-        def _on_scan_done(self, files):
-            self.scan_results = files
-            self._fill_review_table()
-            if not files:
-                QMessageBox.information(
-                    self,
-                    "Nothing to clean! 🎉",
-                    "I didn't find anything worth removing here.",
-                )
-                self._show_done(0, 0, 0)
-                self._go_to(5)
+    def _on_scan_done(self, files):
+        self.scan_results = files
+        self._fill_review_table()
+        if not files:
+            QMessageBox.information(
+                self,
+                "Nothing to clean! 🎉",
+                "I didn't find anything worth removing here.",
+            )
+            self._show_done(0, 0, 0)
+            self._go_to(5)
+        else:
+            self._go_to(3)
+
+    # =========================================================== review
+    def _fill_review_table(self):
+        self.table.setRowCount(0)
+        self.table.setHorizontalHeaderLabels(
+            ["✔", "File", "Location", "Count", "Size", "Age", "Why"]
+        )
+
+        groups = {}
+        for info in self.scan_results:
+            key = (info["name"], round(info["size"] / 1024), info["age"])
+            groups.setdefault(key, []).append(info)
+
+        ordered = sorted(groups.values(), key=lambda g: -sum(f["size"] for f in g))
+
+        for group in ordered:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            first = group[0]
+            total_size = sum(f["size"] for f in group)
+            count = len(group)
+
+            cb = QCheckBox()
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._update_next_button)
+            cw = QWidget()
+            cl = QHBoxLayout(cw)
+            cl.addWidget(cb)
+            cl.setAlignment(Qt.AlignCenter)
+            cl.setContentsMargins(0, 0, 0, 0)
+            self.table.setCellWidget(r, 0, cw)
+
+            label = "📄  " + first["name"]
+            if count > 1:
+                label = f"📄  {first['name']}   ×{count}"
+            name_item = QTableWidgetItem(label)
+            name_item.setData(Qt.UserRole, group)
+            name_item.setToolTip(
+                "\n".join(f["path"] for f in group[:20]) + ("\n…" if count > 20 else "")
+            )
+            self.table.setItem(r, 1, name_item)
+
+            parents = sorted({str(Path(f["path"]).parent) for f in group})
+            if len(parents) == 1:
+                loc_text = short_path(parents[0], 55)
             else:
-                self._go_to(3)
+                loc_text = f"{short_path(parents[0], 35)}  (+{len(parents) - 1} more)"
+            loc = QTableWidgetItem(loc_text)
+            loc.setForeground(QColor("#5a6478"))
+            loc.setToolTip("\n".join(parents))
+            self.table.setItem(r, 2, loc)
 
-        # =========================================================== review
-        def _fill_review_table(self):
-            self.table.setRowCount(0)
-            self.table.setHorizontalHeaderLabels(
-                ["✔", "File", "Location", "Count", "Size", "Age", "Why"]
+            cnt = QTableWidgetItem(f"×{count}" if count > 1 else "1")
+            cnt.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(r, 3, cnt)
+
+            size_item = QTableWidgetItem(human(total_size))
+            size_item.setData(Qt.UserRole, total_size)
+            self.table.setItem(r, 4, size_item)
+
+            self.table.setItem(r, 5, QTableWidgetItem(age(first["age"])))
+            why = QTableWidgetItem(first["reason"])
+            why.setForeground(QColor("#5a6478"))
+            self.table.setItem(r, 6, why)
+
+        self._refresh_review_summary()
+
+    def _refresh_review_summary(self):
+        n, total = self._checked_summary()
+        set_bigstat(self.rev_count, f"{n:,}")
+        set_bigstat(self.rev_size, human(total))
+        self.live_total.setText(f"{n:,} of {len(self.scan_results):,} selected")
+        self._update_next_button()
+
+    def _checked_summary(self):
+        n = 0
+        sz = 0
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 0)
+            if not w:
+                continue
+            cb = w.findChild(QCheckBox)
+            if cb and cb.isChecked():
+                group = self.table.item(r, 1).data(Qt.UserRole) or []
+                n += len(group)
+                sz += sum(f["size"] for f in group)
+        return n, sz
+
+    def _toggle_all(self, state):
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, 0)
+            if w:
+                cb = w.findChild(QCheckBox)
+                if cb:
+                    cb.setChecked(state)
+        self._refresh_review_summary()
+
+    # =========================================================== delete
+
+
+
+    def _learn_from_ai_feedback(self, info, accepted):
+        """
+        Record actual user feedback only for AI suggestions.
+        Rule-based suggestions have confidence >= 900 and are ignored.
+        """
+        try:
+            confidence = float(
+                info.get("confidence", 999)
             )
 
-            groups = {}
-            for info in self.scan_results:
-                key = (info["name"], round(info["size"] / 1024), info["age"])
-                groups.setdefault(key, []).append(info)
+            if confidence >= 900:
+                return
 
-            ordered = sorted(groups.values(), key=lambda g: -sum(f["size"] for f in g))
+            state = info.get("state")
 
-            for group in ordered:
-                r = self.table.rowCount()
-                self.table.insertRow(r)
-                first = group[0]
-                total_size = sum(f["size"] for f in group)
-                count = len(group)
+            if state is None:
+                return
 
-                cb = QCheckBox()
-                cb.setChecked(True)
-                cb.stateChanged.connect(self._update_next_button)
-                cw = QWidget()
-                cl = QHBoxLayout(cw)
-                cl.addWidget(cb)
-                cl.setAlignment(Qt.AlignCenter)
-                cl.setContentsMargins(0, 0, 0, 0)
-                self.table.setCellWidget(r, 0, cw)
+            kind = info.get("kind")
 
-                label = "📄  " + first["name"]
-                if count > 1:
-                    label = f"📄  {first['name']}   ×{count}"
-                name_item = QTableWidgetItem(label)
-                name_item.setData(Qt.UserRole, group)
-                name_item.setToolTip(
-                    "\n".join(f["path"] for f in group[:20]) + ("\n…" if count > 20 else "")
-                )
-                self.table.setItem(r, 1, name_item)
+            self.agent.record_decision(
+                confidence,
+                accepted=accepted,
+                state=state,
+                kind=kind,
+                path=info.get("path"),
+            )
 
-                parents = sorted({str(Path(f["path"]).parent) for f in group})
-                if len(parents) == 1:
-                    loc_text = short_path(parents[0], 55)
-                else:
-                    loc_text = f"{short_path(parents[0], 35)}  (+{len(parents) - 1} more)"
-                loc = QTableWidgetItem(loc_text)
-                loc.setForeground(QColor("#5a6478"))
-                loc.setToolTip("\n".join(parents))
-                self.table.setItem(r, 2, loc)
+            self.agent.reinforce_from_user(
+                state,
+                action=1,
+                accepted=accepted,
+                kind=kind,
+            )
 
-                cnt = QTableWidgetItem(f"×{count}" if count > 1 else "1")
-                cnt.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(r, 3, cnt)
-
-                size_item = QTableWidgetItem(human(total_size))
-                size_item.setData(Qt.UserRole, total_size)
-                self.table.setItem(r, 4, size_item)
-
-                self.table.setItem(r, 5, QTableWidgetItem(age(first["age"])))
-                why = QTableWidgetItem(first["reason"])
-                why.setForeground(QColor("#5a6478"))
-                self.table.setItem(r, 6, why)
-
-            self._refresh_review_summary()
-
-        def _refresh_review_summary(self):
-            n, total = self._checked_summary()
-            set_bigstat(self.rev_count, f"{n:,}")
-            set_bigstat(self.rev_size, human(total))
-            self.live_total.setText(f"{n:,} of {len(self.scan_results):,} selected")
-            self._update_next_button()
-
-        def _checked_summary(self):
-            n = 0
-            sz = 0
-            for r in range(self.table.rowCount()):
-                w = self.table.cellWidget(r, 0)
-                if not w:
-                    continue
-                cb = w.findChild(QCheckBox)
-                if cb and cb.isChecked():
-                    group = self.table.item(r, 1).data(Qt.UserRole) or []
-                    n += len(group)
-                    sz += sum(f["size"] for f in group)
-            return n, sz
-
-        def _toggle_all(self, state):
-            for r in range(self.table.rowCount()):
-                w = self.table.cellWidget(r, 0)
-                if w:
-                    cb = w.findChild(QCheckBox)
-                    if cb:
-                        cb.setChecked(state)
-            self._refresh_review_summary()
-
-        # =========================================================== delete
+        except (TypeError, ValueError, KeyError) as e:
+            self._log(f"Could not record AI feedback: {e}")
 
 
+    def _confirm_and_delete(self):
 
-        def _learn_from_ai_feedback(self, info, accepted):
-            """
-            Record actual user feedback only for AI suggestions.
-            Rule-based suggestions have confidence >= 900 and are ignored.
-            """
+        n, sz = self._checked_summary()
+
+        if n == 0:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Ready to clean up?",
+            f"I'll move {n:,} file(s) to Trash, freeing about {human(sz)}.\n\n"
+            "You can restore them from Nemo if you change your mind.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if answer != QMessageBox.Yes:
+            return
+
+        to_delete = []
+        to_keep = []
+
+        # Collect user choices.
+        for r in range(self.table.rowCount()):
+
+            widget = self.table.cellWidget(r, 0)
+            checkbox = widget.findChild(QCheckBox) if widget else None
+
+            group = self.table.item(r, 1).data(Qt.UserRole) or []
+
+            target = (
+                to_delete
+                if checkbox and checkbox.isChecked()
+                else to_keep
+            )
+
+            target.extend(group)
+
+        # Unchecked AI suggestions are explicit keep decisions.
+        for info in to_keep:
+            self._learn_from_ai_feedback(info, accepted=False)
+
+        self._go_to(4)
+
+        self.clean_msg.setText(
+            f"Trashing {len(to_delete)} file(s)…"
+        )
+        self.clean_bar.setValue(0)
+
+        QApplication.processEvents()
+
+        freed = 0
+        deleted = 0
+        failed = 0
+        skipped = 0
+
+        self._last_trashed = []
+
+        for i, info in enumerate(to_delete, 1):
+
             try:
-                confidence = float(
-                    info.get("confidence", 999)
-                )
-
-                if confidence >= 900:
-                    return
-
-                state = info.get("state")
-
-                if state is None:
-                    return
-
+                p = Path(info["path"])
                 kind = info.get("kind")
 
-                self.agent.record_decision(
-                    confidence,
-                    accepted=accepted,
-                    state=state,
-                    kind=kind,
-                    path=info.get("path"),
+                # File may have disappeared since scanning.
+                if not p.exists() and not p.is_symlink():
+                    skipped += 1
+                    continue
+
+                if not p.is_file() and not p.is_symlink():
+                    skipped += 1
+                    continue
+
+                # Revalidate structural detections.
+                allow_orphan_jar = (
+                    kind == "minecraft-mod"
+                    and is_orphan_mod(p)
                 )
 
-                self.agent.reinforce_from_user(
-                    state,
-                    action=1,
-                    accepted=accepted,
-                    kind=kind,
-                )
+                if kind == "minecraft-mod" and not allow_orphan_jar:
+                    skipped += 1
+                    continue
 
-            except (TypeError, ValueError, KeyError) as e:
-                self._log(f"Could not record AI feedback: {e}")
+                if kind == "vm-leftover" and not is_vm_leftover(p):
+                    skipped += 1
+                    continue
 
+                # Revalidate immutable protection.
+                if is_hard_protected_file(
+                    p,
+                    allow_orphan_jar=allow_orphan_jar,
+                ):
+                    skipped += 1
+                    continue
 
-        def _confirm_and_delete(self):
+                if is_dpkg_owned(p):
+                    skipped += 1
+                    continue
 
-            n, sz = self._checked_summary()
+                # Move to Trash, never permanently unlink.
+                rc = subprocess.run(
+                    ["gio", "trash", "--", str(p)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
 
-            if n == 0:
-                return
+                if rc == 0:
 
-            answer = QMessageBox.question(
-                self,
-                "Ready to clean up?",
-                f"I'll move {n:,} file(s) to Trash, freeing about {human(sz)}.\n\n"
-                "You can restore them from Nemo if you change your mind.\n\n"
-                "Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
+                    self._last_trashed.append(str(p))
 
-            if answer != QMessageBox.Yes:
-                return
+                    deleted += 1
+                    freed += info["size"]
 
-            to_delete = []
-            to_keep = []
-
-            # Collect user choices.
-            for r in range(self.table.rowCount()):
-
-                widget = self.table.cellWidget(r, 0)
-                checkbox = widget.findChild(QCheckBox) if widget else None
-
-                group = self.table.item(r, 1).data(Qt.UserRole) or []
-
-                target = (
-                    to_delete
-                    if checkbox and checkbox.isChecked()
-                    else to_keep
-                )
-
-                target.extend(group)
-
-            # Unchecked AI suggestions are explicit keep decisions.
-            for info in to_keep:
-                self._learn_from_ai_feedback(info, accepted=False)
-
-            self._go_to(4)
-
-            self.clean_msg.setText(
-                f"Trashing {len(to_delete)} file(s)…"
-            )
-            self.clean_bar.setValue(0)
-
-            QApplication.processEvents()
-
-            freed = 0
-            deleted = 0
-            failed = 0
-            skipped = 0
-
-            self._last_trashed = []
-
-            for i, info in enumerate(to_delete, 1):
-
-                try:
-                    p = Path(info["path"])
-                    kind = info.get("kind")
-
-                    # File may have disappeared since scanning.
-                    if not p.exists() and not p.is_symlink():
-                        skipped += 1
-                        continue
-
-                    if not p.is_file() and not p.is_symlink():
-                        skipped += 1
-                        continue
-
-                    # Revalidate structural detections.
-                    allow_orphan_jar = (
-                        kind == "minecraft-mod"
-                        and is_orphan_mod(p)
+                    # Only learn that deletion was accepted if it succeeded.
+                    self._learn_from_ai_feedback(
+                        info,
+                        accepted=True,
                     )
 
-                    if kind == "minecraft-mod" and not allow_orphan_jar:
-                        skipped += 1
-                        continue
-
-                    if kind == "vm-leftover" and not is_vm_leftover(p):
-                        skipped += 1
-                        continue
-
-                    # Revalidate immutable protection.
-                    if is_hard_protected_file(
-                        p,
-                        allow_orphan_jar=allow_orphan_jar,
-                    ):
-                        skipped += 1
-                        continue
-
-                    if is_dpkg_owned(p):
-                        skipped += 1
-                        continue
-
-                    # Move to Trash, never permanently unlink.
-                    rc = subprocess.run(
-                        ["gio", "trash", "--", str(p)],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    ).returncode
-
-                    if rc == 0:
-
-                        self._last_trashed.append(str(p))
-
-                        deleted += 1
-                        freed += info["size"]
-
-                        # Only learn that deletion was accepted if it succeeded.
-                        self._learn_from_ai_feedback(
-                            info,
-                            accepted=True,
-                        )
-
-                    else:
-                        failed += 1
-
-                except Exception as e:
-                    self._log(f"Cleanup error: {e}")
+                else:
                     failed += 1
 
-                if i % 10 == 0 or i == len(to_delete):
+            except Exception as e:
+                self._log(f"Cleanup error: {e}")
+                failed += 1
 
-                    self.clean_bar.setValue(
-                        int(100 * i / max(1, len(to_delete)))
-                    )
+            if i % 10 == 0 or i == len(to_delete):
 
-                    self.clean_msg.setText(
-                        f"Trashing {i} of {len(to_delete)}..."
-                    )
-
-                    QApplication.processEvents()
-
-            # Save actual learned preferences.
-            self.agent.save()
-
-            self._refresh_agent_info()
-
-            self._show_done(
-                freed,
-                deleted,
-                len(to_keep),
-            )
-
-            if failed or skipped:
-                QMessageBox.information(
-                    self,
-                    "Cleanup report",
-                    f"Successfully moved: {deleted}\n"
-                    f"Failed: {failed}\n"
-                    f"Skipped for safety: {skipped}",
+                self.clean_bar.setValue(
+                    int(100 * i / max(1, len(to_delete)))
                 )
 
-            self._go_to(5)
+                self.clean_msg.setText(
+                    f"Trashing {i} of {len(to_delete)}..."
+                )
+
+                QApplication.processEvents()
+
+        # Save actual learned preferences.
+        self.agent.save()
+
+        self._refresh_agent_info()
+
+        self._show_done(
+            freed,
+            deleted,
+            len(to_keep),
+        )
+
+        if failed or skipped:
+            QMessageBox.information(
+                self,
+                "Cleanup report",
+                f"Successfully moved: {deleted}\n"
+                f"Failed: {failed}\n"
+                f"Skipped for safety: {skipped}",
+            )
+
+        self._go_to(5)
+
+    def _show_done(self, freed, deleted, kept):
+        self.done_msg.setText(
+            f"You just freed up {human(freed)} by removing {deleted} file(s)."
+        )
+        set_bigstat(self.done_freed, human(freed))
+        set_bigstat(self.done_files, f"{deleted:,}")
+        set_bigstat(self.done_kept, f"{kept:,}")
+        if getattr(self, "_last_trashed", None):
+            self.btn_restore.setEnabled(True)
+
+    def _restore_last_batch(self):
+        batch = getattr(self, "_last_trashed", [])
+        if not batch:
+            QMessageBox.information(
+                self, "Nothing to restore", "No files were trashed in this session."
+            )
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Restore files?",
+                f"Restore {len(batch)} file(s) from Trash back to their original locations?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        restored = 0
+        failed = 0
+        for path in batch:
+            try:
+                rc = subprocess.run(
+                    ["gio", "trash", "--restore", "--", path],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
+                if rc == 0:
+                    restored += 1
+                else:
+                    failed += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+        QMessageBox.information(
+            self, "Done", f"Restored {restored} file(s). {failed} failed."
+        )
+        self.btn_restore.setEnabled(False)
+        self._last_trashed = []
+
+    # =========================================================== AI
+    def _train_agent(self, episodes, silent=False):
+        if not silent:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        t0 = time.time()
+        train_agent(self.agent, episodes=episodes)
+        self.agent.save()
+        if not silent:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.information(
+                self,
+                "AI retrained",
+                f"Trained on {episodes:,} examples in {time.time() - t0:.1f}s.",
+            )
+        self._refresh_agent_info()
+
+    def _reset_agent(self):
+        if (
+            QMessageBox.question(
+                self,
+                "Reset AI",
+                "Forget everything the AI has learned?  (Your rules stay.)",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.agent.reset()
+        self._train_agent(20000)
+        for rule in self.rules.rules:
+            reinforce_agent_from_rule(self.agent, rule)
+        self.agent.save()
+        self._refresh_agent_info()
+
+    def _refresh_agent_info(self):
+        self.agent_info.setText(
+            f"AI has seen {self.agent.visited_states():,} situations."
+        )
+        n = len(self.rules.rules)
+        if n == 0:
+            self.rules_info.setText("No rules yet — right-click a file to add one.")
+        else:
+            enabled = sum(1 for r in self.rules.rules if r.get("enabled", True))
+            self.rules_info.setText(
+                f"📋 {enabled} of {n} rule(s) active.\nManage in Tools → Teach the AI."
+            )
+
+    def _log(self, m):
+        print(f"[{time.strftime('%H:%M:%S')}] {m}")
+
+    # =========================================================== admin
+    def _relaunch_admin(self):
+        folder = self.folder or HOME
+        deep = self.deep_mode
+        method = self._current_admin_method()
+        if (
+            QMessageBox.question(
+                self,
+                "Relaunch as administrator?",
+                f"Method: {method}\nFolder: {folder}\n"
+                f"Deep scan: {'on' if deep else 'off'}\n\n"
+                "The app will try to open a root instance.",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self._do_admin_relaunch(folder, deep, method)
+
+    def _test_admin_method(self):
+        method = self._current_admin_method()
+        fd, _out = tempfile.mkstemp(prefix="ai-cleaner-test-", suffix=".log")
+        os.close(fd)
+        if method == "terminal":
+            term = find_terminal()
+            if not term:
+                QMessageBox.critical(
+                    self, "No terminal", "Couldn't find a terminal emulator."
+                )
+                return
+            fd2, tmp = tempfile.mkstemp(prefix="ai-cleaner-testterm-", suffix=".sh")
+            os.close(fd2)
+            with open(tmp, "w") as f:
+                f.write("#!/bin/bash\n")
+                f.write("echo 'Testing sudo…'\n")
+                f.write(f"sudo -E id 2>&1 | tee {tmp}\n")
+                f.write("echo '=== done. Press Enter. ==='\n")
+                f.write("read _\n")
+                f.write(f"rm -f {tmp}\n")
+            os.chmod(tmp, 0o755)
+            try:
+                subprocess.Popen(terminal_argv(term, tmp), close_fds=True)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Launch failed", str(e))
+                return
+            QMessageBox.information(
+                self,
+                "Terminal opened",
+                "A terminal window just opened.\n\n"
+                "Type your password there. If you see  uid=0(root)…, "
+                "the terminal method works.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Test",
+                "For pkexec / askpass, testing opens the real dialog. "
+                "Use the scan itself — log at:\n"
+                f"{os.path.join(CONFIG_DIR, 'admin-launch.log')}",
+            )
+
+    # =========================================================== help
+    def _show_help(self):
+        QMessageBox.information(
+            self,
+            "How it works",
+            "The cleaner uses reinforcement learning to decide, for each file, "
+            "whether to KEEP it or DELETE it.\n\n"
+            "🛡  Protected forever: Steam, Lutris, Heroic, Wine, "
+            "PrismLauncher / MultiMC instances, .minecraft, all .jar files, "
+            "and game data (.pak, .sav, .vpk, .bsa…).\n\n"
+            "Teach me anytime: right-click a file in the Review list, or use "
+            "Tools → Teach the AI.",
+        )
+
+    def _show_teach_guide(self):
+        QMessageBox.information(
+            self,
+            "Teach the AI",
+            "Two ways to teach me:\n\n"
+            "  1.  Right-click any file in the Review list.\n"
+            "  2.  Tools → Teach the AI — manage rules…\n\n"
+            "For folder rules, click  📁 Browse…  instead of typing the path.\n\n"
+            "Rules take priority over the AI. Extension rules also nudge the AI.",
+        )
+
+    def _show_about(self):
+        admin = "  (administrator)" if IS_ROOT else ""
+        QMessageBox.about(
+            self,
+            "About AI File Cleaner",
+            f"<h3>AI File Cleaner — Wizard Edition v7{admin}</h3>"
+            "<p>RL-powered cleaner with in-app rule training and admin mode.</p>"
+            "<p>Runs entirely on your machine. No network, no cloud.</p>",
+        )
+
+    # =========================================================== events
+    def closeEvent(self, e):
+        if self.scanner and self.scanner.isRunning():
+            self.scanner.stop()
+            self.scanner.wait(1500)
+        try:
+            self.agent.save()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            self.rules.save()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        e.accept()
 
 
 # The wizard imports these directly from the modules above; the constants
