@@ -1119,6 +1119,7 @@ class Wizard(QMainWindow):
 
         set_bigstat(self.live_files, f"{n:,}")
         set_bigstat(self.live_size, human(total))
+
     def _cancel_scan(self):
         if self.scanner:
             self.scanner.stop()
