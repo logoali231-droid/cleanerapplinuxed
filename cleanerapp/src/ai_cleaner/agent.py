@@ -39,8 +39,8 @@ class SyntheticFileEnv:
             d = 1 - d
         return (ext, size, age, loc), d
 
-   @staticmethod
-    def reward(s, a, t):
+@staticmethod
+def reward(s, a, t):
     ext, _, age, loc = s
     # Never suggest deleting game files.
     if ext == 3 or loc == 3:
