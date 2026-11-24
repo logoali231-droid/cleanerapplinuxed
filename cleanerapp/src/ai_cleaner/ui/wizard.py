@@ -6,8 +6,7 @@ import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from minecraft.py import is_orphan_mod
-
+from ..minecraft import is_orphan_mod
 from PyQt5.QtCore import QEventLoop, Qt, QTimer
 from PyQt5.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
