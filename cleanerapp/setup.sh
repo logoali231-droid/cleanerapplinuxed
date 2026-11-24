@@ -150,19 +150,44 @@ find "$STAGE_DIR" \
 
 echo "Testing application imports..."
 
+TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/${APP_ID}.test.XXXXXX")"
+
 if ! env \
+    HOME="$TEST_HOME" \
     PYTHONDONTWRITEBYTECODE=1 \
     QT_QPA_PLATFORM=offscreen \
     PYTHONPATH="$STAGE_DIR" \
     "$PYTHON_BIN" \
-    -c "import ai_cleaner.config; import ai_cleaner.ui.wizard"
+    -c '
+from PyQt5.QtWidgets import QApplication
+from ai_cleaner.ui.wizard import Wizard
+
+required = (
+    "_cancel_scan", "_on_scan_done", "_fill_review_table",
+    "_refresh_review_summary", "_checked_summary", "_toggle_all",
+    "_learn_from_ai_feedback", "_confirm_and_delete", "_show_done",
+    "_restore_last_batch", "_train_agent", "_reset_agent",
+    "_refresh_agent_info", "_log", "_relaunch_admin", "_test_admin_method",
+    "_show_help", "_show_teach_guide", "_show_about", "closeEvent",
+)
+missing = [name for name in required if not callable(getattr(Wizard, name, None))]
+if missing:
+    raise SystemExit("Missing Wizard methods: " + ", ".join(missing))
+
+app = QApplication([])
+window = Wizard()
+window.close()
+'
 then
+    rm -rf -- "$TEST_HOME"
     echo ""
-    echo "ERROR: Application import test failed."
+    echo "ERROR: Application startup test failed."
     echo "The existing installation was not replaced."
-    echo "Check the Python source files."
+    echo "Check the Python source files and Wizard initialization."
     exit 1
 fi
+
+rm -rf -- "$TEST_HOME"
 
 # --------------------------------------------------
 # 6. Replace old installation safely
