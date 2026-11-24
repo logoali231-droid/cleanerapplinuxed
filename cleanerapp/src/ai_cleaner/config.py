@@ -1,7 +1,6 @@
 """Paths, constants, and per-user config directory."""
 
 import os
-from turtle import home
 
 # Sentinels for confidence values that come from rules/screenshots, not the AI.
 # The AI's real confidence range is roughly 0–30, so anything over 100 is a
@@ -25,7 +24,10 @@ def _user_home():
     return os.path.expanduser("~")
 
 
-CONFIG_DIR = os.path.join(home, ".config", "ai_file_cleaner")
+HOME = _user_home()
+IS_ROOT = os.geteuid() == 0
+
+CONFIG_DIR = os.path.join(HOME, ".config", "ai_file_cleaner")
 QTABLE_PATH = os.path.join(CONFIG_DIR, "qtable.json")
 RULES_PATH = os.path.join(CONFIG_DIR, "rules.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
@@ -34,8 +36,7 @@ DECISIONS_PATH = os.path.join(CONFIG_DIR, "decisions.jsonl")
 ACTION_LOG_PATH = os.path.join(CONFIG_DIR, "actions.jsonl")  # NOVO
 DRY_RUN = True  # NOVO — o __main__ desliga com --apply
 
-HOME = _user_home()
-IS_ROOT = os.geteuid() == 0
+
 
 
 def fix_user_ownership(path):
