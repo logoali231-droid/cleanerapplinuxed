@@ -22,6 +22,8 @@ def _parse_args(argv=None):
 
 if __name__ == "__main__":
     args = _parse_args()
+
     if args.apply:
         config.DRY_RUN = False
-    main(admin_mode=args.admin, start_folder=args.folder, start_deep=args.deep)
+
+    main()
