@@ -1,11 +1,14 @@
 """Paths, constants, and per-user config directory."""
+
 import os
+from turtle import home
 
 # Sentinels for confidence values that come from rules/screenshots, not the AI.
 # The AI's real confidence range is roughly 0–30, so anything over 100 is a
 # rule-derived value and should never be used for calibration.
 CONFIDENCE_RULE = 999.0
 CONFIDENCE_RULE_THRESHOLD = 900.0
+
 
 def _user_home():
     """Resolve the real user's home even when we're running as root."""
@@ -22,8 +25,8 @@ def _user_home():
     return os.path.expanduser("~")
 
 
-CONFIG_DIR = os.path.join(HOME, ".config", "ai_file_cleaner")
-QTABLE_PATH = os.path.join(CONFIG_DIR, "qtable.pkl")
+CONFIG_DIR = os.path.join(home, ".config", "ai_file_cleaner")
+QTABLE_PATH = os.path.join(CONFIG_DIR, "qtable.json")
 RULES_PATH = os.path.join(CONFIG_DIR, "rules.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 DEFAULTS_SEEDED_FLAG = os.path.join(CONFIG_DIR, ".defaults_seeded")
@@ -32,11 +35,30 @@ ACTION_LOG_PATH = os.path.join(CONFIG_DIR, "actions.jsonl")  # NOVO
 DRY_RUN = True  # NOVO — o __main__ desliga com --apply
 
 HOME = _user_home()
-IS_ROOT = (os.geteuid() == 0)
+IS_ROOT = os.geteuid() == 0
 
+
+def fix_user_ownership(path):
+    """
+    Preserve the normal user's ownership when the app runs as root.
+    """
+    if not IS_ROOT:
+        return
+
+    try:
+        owner = os.stat(HOME)
+        os.chown(
+            path,
+            owner.st_uid,
+            owner.st_gid,
+            follow_symlinks=False,
+        )
+    except (OSError, TypeError):
+        pass
 
 
 try:
     os.makedirs(CONFIG_DIR, exist_ok=True)
-except Exception:  # noqa: BLE001, S110
+    fix_user_ownership(CONFIG_DIR)
+except OSError:
     pass

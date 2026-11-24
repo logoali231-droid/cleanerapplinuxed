@@ -65,8 +65,8 @@ def test_save_load_roundtrip(tmp_path):
     for _ in range(20):
         a.learn(s, 1, +5.0)
     a.record_decision(2.5, True)
-    path = tmp_path / "q.pkl"
-    a.save(str(path))
+    path = tmp_path / "q.json"
+    assert a.save(str(path))
 
     b = QLearningAgent()
     assert b.load(str(path))
@@ -92,3 +92,55 @@ def test_reset_calibration():
     assert a.conf_stats
     a.reset_calibration()
     assert a.conf_stats == {}
+
+
+def test_rejected_suggestion_teaches_agent_to_keep():
+    agent = QLearningAgent()
+
+    state = (0, 1, 2, 1)
+
+    agent.reinforce_from_user(
+        state,
+        action=1,
+        accepted=False,
+        kind="binary-archive",
+    )
+
+    keep_value = agent.Q[0][1][2][1][0]
+    delete_value = agent.Q[0][1][2][1][1]
+
+    assert keep_value > delete_value
+
+
+def test_json_qtable_roundtrip(tmp_path):
+
+    a = QLearningAgent()
+
+    state = (2, 3, 1, 2)
+
+    a.learn(state, 1, 10.0)
+    a.record_decision(2.5, True, state=state)
+
+    path = tmp_path / "qtable.json"
+
+    assert a.save(str(path))
+
+    b = QLearningAgent()
+
+    assert b.load(str(path))
+
+    assert b.Q == a.Q
+    assert b.counts == a.counts
+    assert b.conf_stats == a.conf_stats
+    assert b.conf_stats_ctx == a.conf_stats_ctx
+
+
+def test_invalid_json_qtable_is_rejected(tmp_path):
+
+    path = tmp_path / "invalid.json"
+
+    path.write_text('{"version": 1, "Q": []}')
+
+    agent = QLearningAgent()
+
+    assert not agent.load(str(path))

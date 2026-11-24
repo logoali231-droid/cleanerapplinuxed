@@ -1,10 +1,14 @@
 """Persistent user rules with default seeding."""
-import os
-import json
 import fnmatch
+import json
+import os
 
 from .config import (
-    HOME, RULES_PATH, SETTINGS_PATH, DEFAULTS_SEEDED_FLAG,
+    DEFAULTS_SEEDED_FLAG,
+    HOME,
+    RULES_PATH,
+    SETTINGS_PATH,
+    fix_user_ownership,
 )
 from .protection import expand_user_path
 
@@ -42,6 +46,7 @@ class RulesManager:
         try:
             with open(self.path, "w") as f:
                 json.dump(self.rules, f, indent=2)
+                fix_user_ownership(self.path)
         except Exception:
             pass
 
@@ -59,7 +64,8 @@ class RulesManager:
         try:
             with open(SETTINGS_PATH, "w") as f:
                 json.dump(self.settings, f, indent=2)
-        except Exception:
+                fix_user_ownership(SETTINGS_PATH)
+        except Exception:  # noqa: BLE001, S110
             pass
 
     # ------------------------------------------------------- defaults

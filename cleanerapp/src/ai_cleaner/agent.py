@@ -3,11 +3,16 @@
 import json
 import math
 import os
-import pickle
 import random
+import tempfile
 import time
 
-from .config import QTABLE_PATH, CONFIDENCE_RULE_THRESHOLD, DECISIONS_PATH
+from .config import (
+    CONFIDENCE_RULE_THRESHOLD,
+    DECISIONS_PATH,
+    QTABLE_PATH,
+    fix_user_ownership,
+)
 from .state import ext_bucket, location_bucket, kind_bucket
 
 
@@ -31,13 +36,25 @@ class SyntheticFileEnv:
         age = self.rng.choices([0, 1, 2, 3, 4], weights=[15, 20, 20, 25, 20])[0]
 
         d = 0
-        if ext == 0 and loc in (0, 1) and age >= 2 or ext == 2 and loc in (0, 2) and age >= 1 or ext == 1 and loc == 1 and age >= 3 or loc == 4:
+        if (
+            ext == 0
+            and loc in (0, 1)
+            and age >= 2
+            or ext == 2
+            and loc in (0, 2)
+            and age >= 1
+            or ext == 1
+            and loc == 1
+            and age >= 3
+            or loc == 4
+        ):
             d = 1
         elif loc == 5 or ext == 3 or loc == 3:
             d = 0
         if self.rng.random() < 0.05:
             d = 1 - d
         return (ext, size, age, loc), d
+
 
 @staticmethod
 def reward(s, a, t):
@@ -49,14 +66,15 @@ def reward(s, a, t):
     # Deleting is only rewarded when the user explicitly confirms
     # AND the file is old enough to be suspicious.
     if a == 1:  # delete
-        if t == 1 and age >= 2:      # >= 90 days old
+        if t == 1 and age >= 2:  # >= 90 days old
             return +5.0
         if t == 1:
             return +1.0
-        return -50.0                  # wrong delete is very costly
+        return -50.0  # wrong delete is very costly
 
     # Keeping is the safe default.
     return +0.5 if t == 0 else -2.0
+
 
 class QLearningAgent:
     """
@@ -67,11 +85,11 @@ class QLearningAgent:
     without losing the safety of a global fallback.
     """
 
-    SHAPE = (7, 5, 5, 7, 2)          # (ext, size, age, loc, action)
-    CONTEXT_AXES = (0, 3)            # which state axes to condition on
-    DRIFT_WINDOW = 50                # how many recent rates to check
-    DRIFT_MIN_SAMPLES = 20           # don't fire drift until we have data
-    DRIFT_SIGMA = 2.0                # how many std-devs counts as "drift"
+    SHAPE = (7, 5, 5, 7, 2)  # (ext, size, age, loc, action)
+    CONTEXT_AXES = (0, 3)  # which state axes to condition on
+    DRIFT_WINDOW = 50  # how many recent rates to check
+    DRIFT_MIN_SAMPLES = 20  # don't fire drift until we have data
+    DRIFT_SIGMA = 2.0  # how many std-devs counts as "drift"
 
     def __init__(self, alpha=0.15, epsilon=0.15):
         self.alpha = alpha
@@ -199,6 +217,7 @@ class QLearningAgent:
         try:
             with open(DECISIONS_PATH, "a") as f:
                 f.write(json.dumps(entry) + "\n")
+                fix_user_ownership(DECISIONS_PATH)
         except Exception:  # noqa: BLE001, S110
             pass
 
@@ -238,9 +257,9 @@ class QLearningAgent:
         #   - archive / binary content generalizes confidently.
         kb = kind_bucket(kind) if kind else 0
         spread = 0.15
-        if kb in (2, 6):        # text-config, office-doc — be cautious
+        if kb in (2, 6):  # text-config, office-doc — be cautious
             spread = 0.05
-        elif kb in (4, 5):      # archive, binary-magic — trust the lesson
+        elif kb in (4, 5):  # archive, binary-magic — trust the lesson
             spread = 0.25
 
         for s_b in range(5):
@@ -274,8 +293,11 @@ class QLearningAgent:
         """
         if state is not None:
             ext, _s, _a, loc = state
-            ctx = {b: v for (b, e, l), v in self.conf_stats_ctx.items()
-                   if e == ext and l == loc}
+            ctx = {
+                b: v
+                for (b, e, l), v in self.conf_stats_ctx.items()
+                if e == ext and l == loc
+            }
             if ctx:
                 for b in sorted(ctx.keys()):
                     shown, accepted = self._aggregate(ctx, b)
@@ -302,7 +324,7 @@ class QLearningAgent:
         """
         if len(self.conf_history) < self.DRIFT_MIN_SAMPLES:
             return False
-        window = self.conf_history[-self.DRIFT_WINDOW:]
+        window = self.conf_history[-self.DRIFT_WINDOW :]
         n = len(window)
         mean = sum(window) / n
         var = sum((x - mean) ** 2 for x in window) / n
@@ -325,8 +347,9 @@ class QLearningAgent:
         rate = (accepted / total) if total else 0
         thr = self.dynamic_threshold(state=state)
         drift = " (drifting)" if self.calibration_drift() else ""
-        return (f"{total} decisions, {rate * 100:.0f}% accepted, "
-                f"threshold {thr:.2f}{drift}")
+        return (
+            f"{total} decisions, {rate * 100:.0f}% accepted, threshold {thr:.2f}{drift}"
+        )
 
     def calibration_report(self):
         """
@@ -369,41 +392,230 @@ class QLearningAgent:
                             n += 1
         return n
 
+    @staticmethod
+    def _valid_tree(data, shape, integer=False):
+        """Validate the complete Q-table dimensions and values."""
+
+        if not isinstance(data, list):
+            return False
+
+        if len(data) != shape[0]:
+            return False
+
+        if len(shape) == 1:
+            for value in data:
+                if integer:
+                    if type(value) is not int or value < 0:
+                        return False
+
+                else:
+                    if isinstance(value, bool):
+                        return False
+
+                    if not isinstance(value, (int, float)):
+                        return False
+
+                    if not math.isfinite(float(value)):
+                        return False
+
+                    if abs(float(value)) > 1000000:
+                        return False
+
+            return True
+
+        return all(
+            QLearningAgent._valid_tree(
+                item,
+                shape[1:],
+                integer,
+            )
+            for item in data
+        )
+
     def save(self, path=QTABLE_PATH):
+
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+
+        if not self._valid_tree(self.Q, self.SHAPE):
+            return False
+
+        if not self._valid_tree(
+            self.counts,
+            self.SHAPE[:-1],
+            integer=True,
+        ):
+            return False
+
+        context_stats = []
+
+        for (bucket, ext, loc), values in self.conf_stats_ctx.items():
+            context_stats.append(
+                {
+                    "bucket": float(bucket),
+                    "ext": int(ext),
+                    "loc": int(loc),
+                    "shown": int(values[0]),
+                    "accepted": int(values[1]),
+                }
+            )
+
+        payload = {
+            "version": 1,
+            "Q": self.Q,
+            "counts": self.counts,
+            "conf_stats": {str(float(k)): v for k, v in self.conf_stats.items()},
+            "conf_stats_ctx": context_stats,
+            "conf_history": self.conf_history,
+        }
+
+        temp_path = None
+
         try:
-            with open(path, "wb") as f:
-                pickle.dump(
-                    {
-                        "Q": self.Q,
-                        "counts": self.counts,
-                        "conf_stats": self.conf_stats,
-                        "conf_stats_ctx": self.conf_stats_ctx,
-                        "conf_history": self.conf_history,
-                    },
+            fd, temp_path = tempfile.mkstemp(
+                prefix=".qtable-",
+                suffix=".tmp",
+                dir=directory,
+            )
+
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    payload,
                     f,
+                    separators=(",", ":"),
+                    allow_nan=False,
                 )
-        except Exception:  # noqa: BLE001, S110
-            pass
+
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.chmod(temp_path, 0o600)
+
+            fix_user_ownership(temp_path)
+
+            os.replace(temp_path, path)
+
+            fix_user_ownership(path)
+
+            return True
+
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"Could not save Q-table: {exc}")
+
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+            return False
 
     def load(self, path=QTABLE_PATH):
+
         if not os.path.exists(path):
             return False
+
         try:
-            with open(path, "rb") as f:
-                d = pickle.load(f)
-            Q = d["Q"]
-            counts = d["counts"]
-            if hasattr(Q, "tolist"):
-                Q = Q.tolist()
-            if hasattr(counts, "tolist"):
-                counts = counts.tolist()
-            self.Q = Q
+            if os.path.getsize(path) > 5 * 1024 * 1024:
+                return False
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if data.get("version") != 1:
+                return False
+
+            q = data["Q"]
+            counts = data["counts"]
+
+            if not self._valid_tree(q, self.SHAPE):
+                return False
+
+            if not self._valid_tree(
+                counts,
+                self.SHAPE[:-1],
+                integer=True,
+            ):
+                return False
+
+            # Global calibration.
+            global_stats = {}
+
+            for bucket, pair in data.get("conf_stats", {}).items():
+                b = float(bucket)
+
+                if (
+                    not isinstance(pair, list)
+                    or len(pair) != 2
+                    or type(pair[0]) is not int
+                    or type(pair[1]) is not int
+                    or pair[0] < 0
+                    or pair[1] < 0
+                    or pair[1] > pair[0]
+                ):
+                    return False
+
+                global_stats[b] = pair
+
+            # Per-context calibration.
+            context_stats = {}
+
+            for item in data.get("conf_stats_ctx", []):
+                b = float(item["bucket"])
+                ext = int(item["ext"])
+                loc = int(item["loc"])
+
+                shown = item["shown"]
+                accepted = item["accepted"]
+
+                if not (0 <= ext < 7 and 0 <= loc < 7):
+                    return False
+
+                if (
+                    type(shown) is not int
+                    or type(accepted) is not int
+                    or shown < 0
+                    or accepted < 0
+                    or accepted > shown
+                ):
+                    return False
+
+                context_stats[(b, ext, loc)] = [
+                    shown,
+                    accepted,
+                ]
+
+            history = data.get("conf_history", [])
+
+            if (
+                not isinstance(history, list)
+                or len(history) > 500
+                or any(
+                    isinstance(v, bool) or v not in (0, 1, 0.0, 1.0) for v in history
+                )
+            ):
+                return False
+
+            # Only replace current agent state after validation succeeds.
+            self.Q = q
             self.counts = counts
-            self.conf_stats = d.get("conf_stats", {})
-            self.conf_stats_ctx = d.get("conf_stats_ctx", {})
-            self.conf_history = d.get("conf_history", [])
+            self.conf_stats = global_stats
+            self.conf_stats_ctx = context_stats
+            self.conf_history = history
+
             return True
-        except Exception:  # noqa: BLE001
+
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            OverflowError,
+        ):
             return False
 
     def reset(self):

@@ -6,13 +6,14 @@ from pathlib import Path
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from ai_cleaner.protection import GAME_EXTS
+
 from .config import CONFIDENCE_RULE
 from .protection import (
-    GAME_DIRS,
     GAME_EXTS,
-    GAME_PATH_HINTS,
-    in_pseudo_fs,
     in_system_path,
+    is_hard_protected_path,
+    is_hard_protected_file,
     is_dpkg_owned,
     is_screenshot,
     sniff_file_kind,
@@ -37,7 +38,7 @@ BATCH_MIN_SECONDS = 0.15
 # Set this to False once wizard.py connects to `files_found` instead of
 # `file_found`. Emitting the legacy per-item signal costs ~1 µs/file —
 # noticeable at 100k+ files.
-EMIT_LEGACY_FILE_SIGNAL = True
+EMIT_LEGACY_FILE_SIGNAL = False
 
 
 class ScannerThread(QThread):
@@ -60,26 +61,21 @@ class ScannerThread(QThread):
 
     @staticmethod
     def _is_protected(path):
-        p = str(path).lower()
-        if any(g and g.lower() in p for g in GAME_DIRS):
-            return True
-        if any(h in p for h in GAME_PATH_HINTS):
-            return True
-        return path.suffix.lower() in GAME_EXTS
-
+        return (
+        is_hard_protected_path(path)
+        or path.suffix.lower() in GAME_EXTS
+    )
     def _should_prune_dir(self, dirpath, dirname):
         full = os.path.join(dirpath, dirname)
-        if in_pseudo_fs(full):
+
+        if is_hard_protected_path(full):
             return True
-        if in_system_path(full):
-            return True
-        if not self.deep_mode and dirname.startswith("."):  # noqa: SIM102
+
+        if not self.deep_mode and dirname.startswith("."):
             if dirname not in (".local", ".cache"):
                 return True
-        low = full.lower()
-        if any(g and g.lower() in low for g in GAME_DIRS):
-            return True
-        return bool(any(h in low for h in GAME_PATH_HINTS))
+
+        return False
 
     def _count_files(self, root):
         n = 0
@@ -159,90 +155,80 @@ class ScannerThread(QThread):
                 scanned += 1
                 fpath = Path(dirpath) / fname
 
-                # 1. rules first
-                rule_action, rule = self.rules.match(fpath)
-                if rule_action == "protect":
-                    continue
-                if rule_action == "flag":
-                    try:
-                        st = fpath.stat()
-                        info = {
-                            "path": str(fpath),
-                            "name": fpath.name,
-                            "size": st.st_size,
-                            "age": int((time.time() - st.st_mtime) / 86400.0),
-                            "state": None,
-                            "kind": None,
-                            "confidence": CONFIDENCE_RULE,
-                            "reason": rule.get("note")
-                            or f"Your rule: {rule.get('value', '')}",
-                        }
-                        results.append(info)
-                        pending.append(info)
-                    except (PermissionError, OSError):
-                        pass
-                    continue
-
-                # 2. hardcoded protection + sniffing
+                # Never inspect files inside protected paths.
                 try:
                     if not fpath.is_file():
                         continue
-                    if self._is_protected(fpath):
-                        continue
-                    if in_system_path(fpath):
-                        continue
-                    if is_dpkg_owned(fpath):
+
+                    if is_hard_protected_path(fpath):
                         continue
 
-                    kind, _preview = sniff_file_kind(fpath)
-                    if kind in ("text-code", "binary-exec", "unreadable",
-                                "critical", "office-doc"):
-                        continue
-
-                    st = fpath.stat()
-                    size = st.st_size
-                    age = (time.time() - st.st_mtime) / 86400.0
-                    state = extract_state(fpath, size, age)
-
-                    if (
-                        screenshot_age_days > 0
-                        and is_screenshot(fpath)
-                        and age > screenshot_age_days
-                    ):
-                        info = {
-                            "path": str(fpath),
-                            "name": fpath.name,
-                            "size": size,
-                            "age": int(age),
-                            "state": state,
-                            "confidence": CONFIDENCE_RULE,
-                            "reason": (
-                                f"An old screenshot "
-                                f"({int(age)} days) — probably no longer needed"
-                            ),
-                        }
-                        results.append(info)
-                        pending.append(info)
-                        continue
-
-                    if self.agent.act(state, explore=False) == 1:
-                        conf = self.agent.confidence(state)
-                        if min_confidence > 0 and conf < min_confidence:
-                            continue
-                        info = {
-                            "path": str(fpath),
-                            "name": fpath.name,
-                            "size": size,
-                            "age": int(age),
-                            "state": state,
-                            "kind": kind,
-                            "confidence": conf,
-                            "reason": plain_reason(fpath, size, int(age)),
-                        }
-                        results.append(info)
-                        pending.append(info)
-                except (PermissionError, OSError, FileNotFoundError):
+                except (PermissionError, OSError, RuntimeError):
                     continue
+
+                
+
+                # 1. Immutable file protections.
+            try:
+                kind, _preview = sniff_file_kind(fpath)
+
+                if is_hard_protected_file(fpath, kind=kind):
+                    continue
+
+                if is_dpkg_owned(fpath):
+                    continue
+
+            except (PermissionError, OSError, FileNotFoundError):
+                continue
+
+
+            # 2. User rules.
+            # Rules can influence decisions, but cannot override hard protections.
+            rule_action, rule = self.rules.match(fpath)
+
+            if rule_action == "protect":
+                continue
+
+            if rule_action == "flag":
+                try:
+                    st = fpath.stat()
+
+                    info = {
+                        "path": str(fpath),
+                        "name": fpath.name,
+                        "size": st.st_size,
+                        "age": int(
+                            (time.time() - st.st_mtime) / 86400.0
+                        ),
+                        "state": None,
+                        "kind": None,
+                        "confidence": CONFIDENCE_RULE,
+                        "reason": (
+                            rule.get("note")
+                            or f"Your rule: {rule.get('value', '')}"
+                        ),
+                    }
+
+                    results.append(info)
+                    pending.append(info)
+
+                except (PermissionError, OSError):
+                    pass
+
+                continue
+
+
+            # 3. Normal file analysis.
+            try:
+                st = fpath.stat()
+
+                size = st.st_size
+                age = (time.time() - st.st_mtime) / 86400.0
+
+                state = extract_state(fpath, size, age)
+
+            except (PermissionError, OSError, FileNotFoundError):
+                continue
 
                 now = time.time()
 

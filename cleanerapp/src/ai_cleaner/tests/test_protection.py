@@ -1,8 +1,13 @@
-from ai_cleaner.protection import (
-    sniff_file_kind, is_screenshot, in_pseudo_fs, in_system_path,
-    expand_user_path,
-)
 from ai_cleaner.config import HOME
+from ai_cleaner.protection import (
+    expand_user_path,
+    in_pseudo_fs,
+    in_system_path,
+    is_hard_protected_file,
+    is_hard_protected_path,
+    is_screenshot,
+    sniff_file_kind,
+)
 
 
 def test_sniff_empty(tmp_bytes):
@@ -111,3 +116,41 @@ def test_expand_user_path():
     assert expand_user_path("~") == HOME
     assert expand_user_path("~/foo") == os.path.join(HOME, "foo")
     assert expand_user_path("/abs/path") == "/abs/path"
+
+def test_system_paths_are_protected():
+    assert is_hard_protected_path("/usr/bin/ls")
+    assert is_hard_protected_path("/etc/passwd")
+    assert is_hard_protected_path("/proc/1/status")
+
+
+def test_game_extensions_are_protected(tmp_path):
+    jar = tmp_path / "mod.jar"
+    assert is_hard_protected_file(jar)
+
+    world = tmp_path / "world.mca"
+    assert is_hard_protected_file(world)
+
+
+def test_structural_orphan_jar_exception(tmp_path):
+    jar = tmp_path / "old-mod.jar"
+
+    # This exception is only used after structural orphan detection.
+    assert not is_hard_protected_file(
+        jar,
+        allow_orphan_jar=True,
+        kind="binary-archive",
+    )
+
+
+def test_symlink_to_system_file_is_protected(tmp_path):
+    link = tmp_path / "fake-document.txt"
+    link.symlink_to("/etc/passwd")
+
+    assert is_hard_protected_path(link)
+
+
+def test_secret_files_are_protected(tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=example")
+
+    assert is_hard_protected_file(secret)

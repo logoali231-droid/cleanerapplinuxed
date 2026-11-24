@@ -380,3 +380,77 @@ def is_dpkg_owned(path):
         # Couldn't load the list (unusual) — fail open, don't skip
         return False
     return str(path) in owned
+
+
+def _is_path_inside(path, root):
+    """Check containment using path components, not string prefixes."""
+    try:
+        candidate = Path(path)
+        base = Path(root)
+        return candidate == base or base in candidate.parents
+    except (OSError, RuntimeError, TypeError):
+        return False
+
+
+def is_hard_protected_path(path):
+    """
+    Immutable path protection.
+    User rules and AI decisions cannot override this.
+    Checks both the supplied path and its resolved target.
+    """
+    try:
+        original = Path(path).expanduser().absolute()
+        resolved = original.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        # Fail closed if the path cannot be resolved safely.
+        return True
+
+    for candidate in (original, resolved):
+        if in_pseudo_fs(candidate):
+            return True
+
+        if in_system_path(candidate):
+            return True
+
+        if any(_is_path_inside(candidate, root) for root in GAME_DIRS):
+            return True
+
+        low = str(candidate).lower()
+        if any(hint.lower() in low for hint in GAME_PATH_HINTS):
+            return True
+
+    return False
+
+
+def is_hard_protected_file(
+    path,
+    allow_orphan_jar=False,
+    kind=None,
+):
+    """
+    Immutable file protection.
+
+    Minecraft JAR files have one controlled exception:
+    they can be considered only after structural orphan detection.
+    """
+    if is_hard_protected_path(path):
+        return True
+
+    suffix = Path(path).suffix.lower()
+
+    if suffix in GAME_EXTS:
+        if not (allow_orphan_jar and suffix == ".jar"):
+            return True
+
+    if kind is None:
+        kind, _ = sniff_file_kind(path)
+
+    protected_kinds = {
+        "text-code",
+        "binary-exec",
+        "unreadable",
+        "critical",
+        "office-doc",
+    }
+
+    return kind in protected_kinds
