@@ -22,15 +22,19 @@ def _user_home():
     return os.path.expanduser("~")
 
 
-HOME = _user_home()
-IS_ROOT = (os.geteuid() == 0)
-
 CONFIG_DIR = os.path.join(HOME, ".config", "ai_file_cleaner")
 QTABLE_PATH = os.path.join(CONFIG_DIR, "qtable.pkl")
 RULES_PATH = os.path.join(CONFIG_DIR, "rules.json")
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
 DEFAULTS_SEEDED_FLAG = os.path.join(CONFIG_DIR, ".defaults_seeded")
 DECISIONS_PATH = os.path.join(CONFIG_DIR, "decisions.jsonl")
+ACTION_LOG_PATH = os.path.join(CONFIG_DIR, "actions.jsonl")  # NOVO
+DRY_RUN = True  # NOVO — o __main__ desliga com --apply
+
+HOME = _user_home()
+IS_ROOT = (os.geteuid() == 0)
+
+
 
 try:
     os.makedirs(CONFIG_DIR, exist_ok=True)

@@ -39,15 +39,24 @@ class SyntheticFileEnv:
             d = 1 - d
         return (ext, size, age, loc), d
 
-    @staticmethod
+   @staticmethod
     def reward(s, a, t):
-        ext, _, _, loc = s
-        if ext == 3 or loc == 3:
-            return +1.0 if a == 0 else -1000.0
-        if a == 1:
-            return +10.0 if t == 1 else -100.0
-        return -1.0 if t == 1 else +1.0
+    ext, _, age, loc = s
+    # Never suggest deleting game files.
+    if ext == 3 or loc == 3:
+        return +1.0 if a == 0 else -1000.0
 
+    # Deleting is only rewarded when the user explicitly confirms
+    # AND the file is old enough to be suspicious.
+    if a == 1:  # delete
+        if t == 1 and age >= 2:      # >= 90 days old
+            return +5.0
+        if t == 1:
+            return +1.0
+        return -50.0                  # wrong delete is very costly
+
+    # Keeping is the safe default.
+    return +0.5 if t == 0 else -2.0
 
 class QLearningAgent:
     """

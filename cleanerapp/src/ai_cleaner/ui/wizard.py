@@ -47,7 +47,7 @@ from ..utils import age, duration, human, short_path
 from .rules_dialog import RulesDialog
 from .styles import QSS
 from .widgets import card, make_stat, set_bigstat
-
+from ..safe_delete import safe_delete
 
 class Wizard(QMainWindow):
     STEPS = ["Welcome", "Choose folder", "Scan", "Review", "Clean up", "Done"]  # noqa: RUF012
@@ -1131,107 +1131,43 @@ class Wizard(QMainWindow):
         self._refresh_review_summary()
 
     # =========================================================== delete
-    def _confirm_and_delete(self):
-        n, sz = self._checked_summary()
-        if n == 0:
+def _confirm_and_delete(self):
+    paths = self._selected_paths()  # você já tem algo assim na tabela
+    if not paths:
+        return
+
+    # Confirmação explícita, mesmo em modo apply.
+    from PyQt5.QtWidgets import QMessageBox
+    n = len(paths)
+    if config.DRY_RUN:
+        QMessageBox.information(
+            self, "Dry run",
+            f"{n} file(s) would be moved to Trash.\n\n"
+            "Run with --apply to actually move them.",
+        )
+    else:
+        reply = QMessageBox.question(
+            self, "Move to Trash?",
+            f"Move {n} file(s) to Trash?\nYou can restore them from Nemo.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
             return
-        if QMessageBox.question(
-            self, "Ready to clean up?",
-            f"I'll move {n:,} file(s) to Trash, freeing about {human(sz)}.\n\n"
-            "You can restore them from Nemo if you change your mind.\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
-            return
 
-        to_delete, to_keep = [], []
-        for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, 0)
-            cb = w.findChild(QCheckBox) if w else None
-            group = self.table.item(r, 1).data(Qt.UserRole) or []
-            target = to_delete if (cb and cb.isChecked()) else to_keep
-            for info in group:
-                target.append(info)
+    summary = safe_delete(paths)
 
-                # ---- Batch-aware reinforcement ----
-        # Group decisions by state so 20 deleted screenshots produce one
-        # strong update instead of 20 weak identical ones. Capped so a
-        # 500-file batch doesn't slam the Q-values out of range.
-        R = 3.0
-        MAX_BOOST = 10
-
-        delete_counts = Counter(
-            f["state"] for f in to_delete if f.get("state") is not None)
-        keep_counts = Counter(
-            f["state"] for f in to_keep if f.get("state") is not None)
-                # --- record calibration data (one entry per file, not per state) ---
-        for f in to_delete:
-            self.agent.record_decision(f.get("confidence"), accepted=True)
-        for f in to_keep:
-            self.agent.record_decision(f.get("confidence"), accepted=False)
-        cluster_info = []
-        for state, count in delete_counts.items():
-            weight = min(count, MAX_BOOST)
-            self.agent.learn(state, 1, +R * weight)
-            self.agent.learn(state, 0, -R * weight)
-            cluster_info.append(f"delete×{count}→{weight}")
-        for state, count in keep_counts.items():
-            weight = min(count, MAX_BOOST)
-            self.agent.learn(state, 0, +R * weight)
-            self.agent.learn(state, 1, -R * weight)
-            cluster_info.append(f"keep×{count}→{weight}")
-
-        if cluster_info:
-            self._log(f"Batch learning: {len(cluster_info)} state clusters "
-                      f"({', '.join(cluster_info[:5])}"
-                      f"{', …' if len(cluster_info) > 5 else ''})")
-            self._log(f"Calibration: {self.agent.calibration_summary()}")
-
-        self._go_to(4)
-        self.clean_msg.setText(f"Trashing {len(to_delete)} file(s)…")
-        self.clean_bar.setValue(0)
-        QApplication.processEvents()
-
-        freed = deleted = failed = skipped = 0
-        self._last_trashed = []
-        for i, f in enumerate(to_delete, 1):
-            try:
-                p = Path(f["path"])
-                pl = str(p).lower()
-                if any(g and g.lower() in pl for g in GAME_DIRS) \
-                   or any(h in pl for h in GAME_PATH_HINTS) \
-                   or p.suffix.lower() in GAME_EXTS:
-                    skipped += 1
-                    continue
-                if p.exists() and p.is_file():
-                    rc = subprocess.run(
-                        ["gio", "trash", "--", str(p)],
-                        check=False, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    ).returncode
-                    if rc == 0:
-                        self._last_trashed.append(str(p))
-                        deleted += 1
-                        freed += f["size"]
-                    else:
-                        p.unlink()
-                        deleted += 1
-                        freed += f["size"]
-                else:
-                    skipped += 1
-            except Exception:  # noqa: BLE001
-                failed += 1
-            if i % 10 == 0 or i == len(to_delete):
-                self.clean_bar.setValue(int(100 * i / max(1, len(to_delete))))
-                self.clean_msg.setText(f"Trashing {i} of {len(to_delete)}…")
-                QApplication.processEvents()
-
-        self.agent.save()
-        train_agent(self.agent, episodes=1500)
-        self.agent.save()
-        self._refresh_agent_info()
-        self._show_done(freed, deleted, len(to_keep))
-        self._go_to(5)
-
+    # Atualize UI/estatísticas
+    self.done_files.setText(str(len(summary["moved"])))
+    self._log(
+        f"Trash: {len(summary['moved'])} moved, "
+        f"{len(summary['skipped'])} skipped, "
+        f"{len(summary['errors'])} errors."
+    )
+    if summary["errors"]:
+        QMessageBox.warning(
+            self, "Some files could not be moved",
+            "\n".join(f"{e['path']}: {e['reason']}" for e in summary["errors"][:10]),
+        )
     def _show_done(self, freed, deleted, kept):
         self.done_msg.setText(
             f"You just freed up {human(freed)} by removing {deleted} file(s).")

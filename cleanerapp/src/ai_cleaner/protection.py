@@ -116,13 +116,20 @@ def in_pseudo_fs(p):
 
 
 def in_system_path(p):
-    p = str(p)
+    """Resolve symlinks before checking, so a link in $HOME cannot bypass."""
+    p = str(Path(p).expanduser().resolve(strict=False))
     for skip in SYSTEM_PROTECTED:
         if p == skip or p.startswith(skip + "/"):
             return True
     return False
 
 
+def is_mount_boundary(path: Path) -> bool:
+    """True if `path` is on a different filesystem than its parent."""
+    try:
+        return path.stat().st_dev != path.parent.stat().st_dev
+    except OSError:
+        return True  # conservative
 def expand_user_path(p):
     """Expand `~` using HOME (which is the *user's* home, not root's)."""
     if p.startswith("~"):
