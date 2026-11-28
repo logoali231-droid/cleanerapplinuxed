@@ -1000,7 +1000,7 @@ class Wizard(QMainWindow):
         self.scan_results.clear()
         self.table.setRowCount(0)
         self.scan_bar.setRange(0, 0)
-        self.scan_counter.setText("Counting files…")
+        self.scan_counter.setText("Preparing scan…")
         self.scan_curdir.setText("")
         self.scan_eta.setText("")
         self.scan_status.setText("Preparing…")
@@ -1086,21 +1086,31 @@ class Wizard(QMainWindow):
 
     def _on_progress(self, scanned, total, cur_dir, eta, is_counting):
         if is_counting:
+            # Kept for compatibility with older scanner implementations.
             self.scan_bar.setRange(0, 0)
             self.scan_counter.setText(f"Counting…  {scanned:,} files so far")
             if cur_dir:
                 self.scan_curdir.setText(short_path(cur_dir))
             return
+
         if total > 0:
             self.scan_bar.setRange(0, 100)
             self.scan_bar.setValue(int(100 * scanned / total))
+            self.scan_counter.setText(
+                f"{scanned:,} / {total:,} files checked"
+            )
         else:
+            # The current scanner is single-pass, so it does not crawl the
+            # whole tree a second time merely to calculate a total.
             self.scan_bar.setRange(0, 0)
-        self.scan_counter.setText(f"{scanned:,} / {total:,} files checked")
+            self.scan_counter.setText(f"{scanned:,} files checked")
+
         if cur_dir:
             self.scan_curdir.setText(short_path(cur_dir))
-        if eta < 0:
-            # Sentinel from the scanner: not enough data yet
+
+        if total <= 0:
+            self.scan_eta.setText("Live scan · total not pre-counted")
+        elif eta < 0:
             self.scan_eta.setText("Calculating…")
         elif eta < 5:
             self.scan_eta.setText("Almost done…")
